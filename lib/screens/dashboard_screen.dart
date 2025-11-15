@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:home_mart/error_handler.dart'; // Import error handler
 
-class DashboardScreen extends StatelessWidget {
+class DashboardScreen extends StatefulWidget {
   final String serverUrl;
   final String sid;
   final String fullName;
@@ -12,6 +12,22 @@ class DashboardScreen extends StatelessWidget {
     required this.sid,
     required this.fullName,
   });
+
+  @override
+  State<DashboardScreen> createState() => _DashboardScreenState();
+}
+
+class _DashboardScreenState extends State<DashboardScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // Validate SID before proceeding
+    if (widget.sid.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        Navigator.pushNamedAndRemoveUntil(context, '/', (route) => false);
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -58,19 +74,19 @@ class DashboardScreen extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        'Welcome to Home Mart, $fullName!',
+                        'Welcome to Home Mart, ${widget.fullName}!',
                         style: Theme.of(context).textTheme.titleLarge,
                       ),
-                      const SizedBox(height: 8),
+                      // const SizedBox(height: 8),
                       // Text(
-                      //   'Session ID: $sid',
+                      //   'Session ID: ${widget.sid}',
                       //   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       //     color: Colors.grey[700],
                       //   ),
                       // ),
                       // const SizedBox(height: 4),
                       // Text(
-                      //   'Server URL: $serverUrl',
+                      //   'Server URL: ${widget.serverUrl}',
                       //   style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       //     color: Colors.grey[700],
                       //   ),
@@ -86,10 +102,15 @@ class DashboardScreen extends StatelessWidget {
                 title: 'Manage Quotations',
                 subtitle: 'View, create, and edit customer quotations.',
                 onTap: () {
+                  if (widget.sid.isEmpty) {
+                    showErrorDialog(context, 'Session Error', 'Invalid session. Please log in again.');
+                    Navigator.pushNamedAndRemoveUntil(context, '/', (route) => false);
+                    return;
+                  }
                   Navigator.pushNamed(
                     context,
                     '/quotation_list',
-                    arguments: {'sid': sid, 'serverUrl': serverUrl},
+                    arguments: {'sid': widget.sid, 'serverUrl': widget.serverUrl},
                   );
                 },
               ),
@@ -135,17 +156,17 @@ class DashboardScreen extends StatelessWidget {
                       Text(
                         title,
                         style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                          color: isDisabled ? Colors.grey[600] : null,
-                        ),
+                              color: isDisabled ? Colors.grey[600] : null,
+                            ),
                       ),
                       const SizedBox(height: 4),
                       Text(
                         subtitle,
                         style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: isDisabled
-                              ? Colors.grey[500]
-                              : Colors.grey[700],
-                        ),
+                              color: isDisabled
+                                  ? Colors.grey[500]
+                                  : Colors.grey[700],
+                            ),
                       ),
                     ],
                   ),

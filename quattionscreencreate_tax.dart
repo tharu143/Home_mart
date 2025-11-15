@@ -8,6 +8,47 @@ import 'dart:convert';
 import 'package:retry/retry.dart';
 import 'package:home_mart/error_handler.dart'; // Assumed to contain error dialog functions
 
+// A dedicated model class for a tax row to ensure data integrity and stability.
+class TaxRow {
+  String chargeType;
+  String? accountHead;
+  String description;
+  double rate;
+  List<String> sourceItemCodes;
+  bool isManual;
+
+  // UI-specific state is managed within the model.
+  final TextEditingController rateController;
+  final TextEditingController amountController;
+  final TextEditingController descriptionController;
+  final TextEditingController accountHeadController;
+  final GlobalKey targetKey;
+  final LayerLink layerLink;
+
+  TaxRow({
+    required this.chargeType,
+    this.accountHead,
+    required this.description,
+    required this.rate,
+    required this.sourceItemCodes,
+    required this.isManual,
+  })  : rateController = TextEditingController(text: (chargeType != 'Actual' ? rate : 0.0).toStringAsFixed(2)),
+        amountController = TextEditingController(text: (chargeType == 'Actual' ? rate : 0.0).toStringAsFixed(2)),
+        descriptionController = TextEditingController(text: description),
+        accountHeadController = TextEditingController(text: description),
+        targetKey = GlobalKey(),
+        layerLink = LayerLink();
+
+  // Helper method to dispose all controllers, preventing memory leaks.
+  void dispose() {
+    rateController.dispose();
+    amountController.dispose();
+    descriptionController.dispose();
+    accountHeadController.dispose();
+  }
+}
+
+
 class QuotationScreen extends StatefulWidget {
   final String serverUrl;
   final String sid;
@@ -33,28 +74,18 @@ class _QuotationScreenState extends State<QuotationScreen> {
   dynamic _selectedCustomer;
   dynamic _selectedSalesperson;
   String _selectedTaxCategory = 'Inter State';
-  List<Map<String, dynamic>> _customTaxes = [];
+  // The list of custom taxes now uses the robust TaxRow model.
+  List<TaxRow> _customTaxes = [];
   bool _isLoading = true;
   final _quotationToController = TextEditingController(text: 'Customer');
   DateTime _transactionDate = DateTime.now();
   double _cachedTotalAmount = 0.0;
   double _cachedGrandTotal = 0.0;
   int _cachedTotalQuantity = 0;
-  double _cachedNetTotal = 0.0; // ADDED for new calculation logic
   List<Map<String, dynamic>> _calculatedTaxes = [];
   String _namingSeries = 'SAL-QTN-.YYYY';
   String _sellingPriceList = 'Standard Selling';
   String _currency = 'INR';
-  String? _currentUserEmail;
-
-  // --- START: STATE FOR ADDITIONAL DISCOUNT ---
-  String _applyDiscountOn = 'Grand Total';
-  final _additionalDiscountPercentageController = TextEditingController();
-  final _additionalDiscountAmountController = TextEditingController();
-  final _additionalDiscountPercentFocus = FocusNode();
-  final _additionalDiscountAmountFocus = FocusNode();
-  double _cachedAdditionalDiscount = 0.0;
-  // --- END: STATE FOR ADDITIONAL DISCOUNT ---
 
   final Set<String> _manuallyRemovedTaxes = {};
   final List<String> _uomList = ['Nos', 'Unit', 'Box', 'Pair', 'Set', 'Meter', 'Kg', 'Ltr', 'Pcs'];
@@ -71,20 +102,6 @@ class _QuotationScreenState extends State<QuotationScreen> {
     _accountSearchController.addListener(() {
       _filterAccountHeads(_accountSearchController.text);
     });
-
-    // --- START: ADD LISTENERS FOR DISCOUNT FIELDS ---
-    _additionalDiscountPercentageController.addListener(() {
-      if (_additionalDiscountPercentFocus.hasFocus) {
-        _updateAdditionalDiscount(fromPercent: true);
-      }
-    });
-    _additionalDiscountAmountController.addListener(() {
-      if (_additionalDiscountAmountFocus.hasFocus) {
-        _updateAdditionalDiscount(fromPercent: false);
-      }
-    });
-    // --- END: ADD LISTENERS FOR DISCOUNT FIELDS ---
-
     _initializeData();
   }
 
@@ -92,34 +109,22 @@ class _QuotationScreenState extends State<QuotationScreen> {
   void dispose() {
     _quotationToController.dispose();
     for (var item in _selectedItems) {
-      item['priceController']?.dispose();
       item['quantityController']?.dispose();
       item['discountPercentController']?.dispose();
       item['discountAmountController']?.dispose();
     }
+    // Properly dispose controllers for each tax row.
     for (var tax in _customTaxes) {
-      tax['rateController']?.dispose();
-      tax['amountController']?.dispose();
-      tax['descriptionController']?.dispose();
-      tax['accountHeadController']?.dispose();
+      tax.dispose();
     }
     _accountSearchController.dispose();
     _removeOverlay();
-
-    // --- START: DISPOSE NEW CONTROLLERS AND FOCUS NODES ---
-    _additionalDiscountPercentageController.dispose();
-    _additionalDiscountAmountController.dispose();
-    _additionalDiscountPercentFocus.dispose();
-    _additionalDiscountAmountFocus.dispose();
-    // --- END: DISPOSE NEW CONTROLLERS AND FOCUS NODES ---
-
     super.dispose();
   }
 
   Future<void> _initializeData() async {
     setState(() => _isLoading = true);
     await Future.wait([
-      _fetchCurrentUser(),
       _fetchItems(),
       _fetchCustomers(),
       _fetchSalespersons(),
@@ -133,48 +138,12 @@ class _QuotationScreenState extends State<QuotationScreen> {
     });
   }
 
-  Map<String, dynamic> _createNewTaxRow({
-    required String chargeType,
-    required String? accountHead,
-    required String description,
-    required double rate,
-    List<String>? sourceItemCodes,
-    required bool isManual,
-  }) {
-    final resolvedRate = chargeType != 'Actual' ? rate : 0.0;
-    final resolvedAmount = chargeType == 'Actual' ? rate : 0.0;
-
-    return {
-      'charge_type': chargeType,
-      'account_head': accountHead,
-      'description': description,
-      'rate': resolvedRate,
-      'amount': resolvedAmount,
-      'rateController': TextEditingController(text: resolvedRate.toStringAsFixed(2)),
-      'amountController': TextEditingController(text: resolvedAmount.toStringAsFixed(2)),
-      'descriptionController': TextEditingController(text: description),
-      'accountHeadController': TextEditingController(text: description),
-      'targetKey': GlobalKey(),
-      'layerLink': LayerLink(),
-      'source_item_codes': sourceItemCodes ?? [],
-      'is_manual': isManual,
-    };
-  }
-
   void _loadInitialData() {
     if (widget.initialData != null) {
       final data = widget.initialData!;
       _quotationToController.text = data['quotation_to']?.toString() ?? 'Customer';
       _transactionDate = DateTime.tryParse(data['transaction_date']?.toString() ?? '') ?? DateTime.now();
       _selectedTaxCategory = data['tax_category'] ?? 'Inter State';
-
-      // --- START: LOAD ADDITIONAL DISCOUNT DATA ---
-      _applyDiscountOn = data['apply_discount_on']?.toString() ?? 'Grand Total';
-      final additionalDiscountPercent = (data['additional_discount_percentage'] as num?)?.toDouble() ?? 0.0;
-      final additionalDiscountAmount = (data['discount_amount'] as num?)?.toDouble() ?? 0.0;
-      _additionalDiscountPercentageController.text = additionalDiscountPercent.toStringAsFixed(2);
-      _additionalDiscountAmountController.text = additionalDiscountAmount.toStringAsFixed(2);
-      // --- END: LOAD ADDITIONAL DISCOUNT DATA ---
 
       _selectedItems = List<Map<String, dynamic>>.from(
         (data['items'] as List<dynamic>?)?.map((item) {
@@ -195,9 +164,6 @@ class _QuotationScreenState extends State<QuotationScreen> {
                 'image': item['image']?.toString(),
                 'barcode': _parseBarcodeFromItem(item),
                 'taxes': item['taxes'] ?? fullItemData['taxes'] ?? [],
-                'priceController': TextEditingController(
-                  text: ((item['price_list_rate'] ?? 0.0) as num).toDouble().toStringAsFixed(2),
-                ),
                 'quantityController': TextEditingController(text: (item['qty'] ?? 1).toString()),
                 'discountPercentController': TextEditingController(
                   text: ((item['discount_percentage'] ?? 0.0) as num).toDouble().toStringAsFixed(2),
@@ -231,24 +197,15 @@ class _QuotationScreenState extends State<QuotationScreen> {
           : null;
 
       final Map<String, List<String>> itemGeneratedTaxSources = {};
-
       for (final item in _selectedItems) {
         final itemCode = item['item_code'] as String;
-        final fullItemData = _itemsList.firstWhere(
-          (i) => i['item_code'] == itemCode,
-          orElse: () => {'taxes': []},
-        );
+        final fullItemData = _itemsList.firstWhere((i) => i['item_code'] == itemCode, orElse: () => {'taxes': []});
         final List<dynamic> itemTaxes = fullItemData['taxes'] ?? [];
         for (var itemTaxInfo in itemTaxes) {
           if (itemTaxInfo['tax_category'] == _selectedTaxCategory) {
             final String? templateName = itemTaxInfo['item_tax_template'];
             if (templateName == null) continue;
-
-            final selectedTemplate = _salesTaxTemplates.firstWhere(
-              (t) => t['template_name'] == templateName,
-              orElse: () => null,
-            );
-
+            final selectedTemplate = _salesTaxTemplates.firstWhere((t) => t['template_name'] == templateName, orElse: () => null);
             if (selectedTemplate != null && selectedTemplate['taxes'] != null) {
               for (var taxComponent in selectedTemplate['taxes']) {
                 final accountHeadName = taxComponent['account_head']?.toString() ?? '';
@@ -262,20 +219,17 @@ class _QuotationScreenState extends State<QuotationScreen> {
       }
 
       if (data['taxes'] != null && (data['taxes'] as List).isNotEmpty) {
-        _customTaxes = List<Map<String, dynamic>>.from(
+        _customTaxes = List<TaxRow>.from(
           (data['taxes'] as List<dynamic>).map((savedTax) {
             final accountHeadName = savedTax['account_head']?.toString();
             final sources = itemGeneratedTaxSources[accountHeadName] ?? [];
             final isManual = sources.isEmpty;
-            final account = _accountHeads.firstWhere(
-              (h) => h['name'] == accountHeadName,
-              orElse: () => {'account_name': accountHeadName},
-            );
+            final account = _accountHeads.firstWhere((h) => h['name'] == accountHeadName, orElse: () => {'account_name': accountHeadName});
             final displayName = account['account_name'] ?? accountHeadName ?? '';
             final chargeType = savedTax['charge_type']?.toString() ?? 'On Net Total';
             final rate = (savedTax['rate'] as num?)?.toDouble() ?? 0.0;
-
-            return _createNewTaxRow(
+            
+            return TaxRow(
               chargeType: chargeType,
               accountHead: accountHeadName,
               description: displayName,
@@ -309,7 +263,9 @@ class _QuotationScreenState extends State<QuotationScreen> {
       };
 
   Future<dynamic> _fetchData(String endpoint, {bool isCustomMethod = true}) async {
-    final url = isCustomMethod ? "${widget.serverUrl}/api/method/$endpoint" : "${widget.serverUrl}/api/resource/$endpoint";
+    final url = isCustomMethod
+        ? "${widget.serverUrl}/api/method/$endpoint"
+        : "${widget.serverUrl}/api/resource/$endpoint";
     try {
       final response = await retry(
         () => http.get(Uri.parse(url), headers: _getHeaders()),
@@ -348,7 +304,9 @@ class _QuotationScreenState extends State<QuotationScreen> {
     final data = await _fetchData("custom_scripts.API.qtn.get_salesperson");
     if (data != null && data['message'] != null && mounted) {
       setState(() {
-        _salespersonsList = (data['message'] as List<dynamic>).map((item) => {'salesperson_name': item['sales_person_name']?.toString() ?? ''}).toList();
+        _salespersonsList = (data['message'] as List<dynamic>)
+            .map((item) => {'salesperson_name': item['sales_person_name']?.toString() ?? ''})
+            .toList();
       });
     }
   }
@@ -367,15 +325,6 @@ class _QuotationScreenState extends State<QuotationScreen> {
     } else {
       if (!mounted) return;
       showErrorDialog(context, 'Fetch Error', 'Failed to load account heads.');
-    }
-  }
-
-  Future<void> _fetchCurrentUser() async {
-    final data = await _fetchData("frappe.auth.get_logged_user");
-    if (data != null && data['message'] != null && mounted) {
-      setState(() {
-        _currentUserEmail = data['message'] as String?;
-      });
     }
   }
 
@@ -414,7 +363,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
       if (!_uomList.contains(defaultUom)) {
         _uomList.add(defaultUom);
       }
-
+      
       _selectedItems.add({
         'item_name': item['item_name'] ?? 'Unknown',
         'item_code': item['item_code'] ?? '',
@@ -428,7 +377,6 @@ class _QuotationScreenState extends State<QuotationScreen> {
         'image': item['image'],
         'barcode': _parseBarcodeFromItem(item),
         'taxes': item['taxes'] ?? [],
-        'priceController': TextEditingController(text: ((item['price_list_rate'] as num?)?.toDouble() ?? 0.0).toStringAsFixed(2)),
         'quantityController': TextEditingController(text: '1'),
         'discountPercentController': TextEditingController(text: '0.00'),
         'discountAmountController': TextEditingController(text: '0.00'),
@@ -440,12 +388,9 @@ class _QuotationScreenState extends State<QuotationScreen> {
         if (itemTaxInfo['tax_category'] == _selectedTaxCategory) {
           final String? templateName = itemTaxInfo['item_tax_template'];
           if (templateName == null) continue;
-
-          final selectedTemplate = _salesTaxTemplates.firstWhere(
-            (t) => t['template_name'] == templateName,
-            orElse: () => null,
-          );
-
+          
+          final selectedTemplate = _salesTaxTemplates.firstWhere((t) => t['template_name'] == templateName, orElse: () => null);
+          
           if (selectedTemplate != null && selectedTemplate['taxes'] != null) {
             for (var taxComponent in selectedTemplate['taxes']) {
               _addOrUpdateTaxFromItem(taxComponent, item['item_code']);
@@ -465,25 +410,20 @@ class _QuotationScreenState extends State<QuotationScreen> {
       return;
     }
 
-    final existingTaxIndex = _customTaxes.indexWhere((t) => t['account_head'] == accountHeadName);
-
+    final existingTaxIndex = _customTaxes.indexWhere((t) => t.accountHead == accountHeadName);
+    
     if (existingTaxIndex != -1) {
       final tax = _customTaxes[existingTaxIndex];
-      if (tax['source_item_codes'] is List) {
-        if (!(tax['source_item_codes'] as List).contains(itemCode)) {
-          (tax['source_item_codes'] as List).add(itemCode);
-        }
+      if (!tax.sourceItemCodes.contains(itemCode)) {
+        tax.sourceItemCodes.add(itemCode);
       }
     } else {
-      final account = _accountHeads.firstWhere(
-        (h) => h['name'] == accountHeadName,
-        orElse: () => {'account_name': accountHeadName},
-      );
+      final account = _accountHeads.firstWhere((h) => h['name'] == accountHeadName, orElse: () => {'account_name': accountHeadName});
       final displayName = account['account_name'] ?? accountHeadName;
       final chargeType = taxComponent['charge_type'] ?? 'On Net Total';
       final rate = (taxComponent['rate'] as num?)?.toDouble() ?? 0.0;
-
-      final newTax = _createNewTaxRow(
+      
+      final newTax = TaxRow(
         chargeType: chargeType,
         accountHead: accountHeadName,
         description: displayName,
@@ -502,10 +442,10 @@ class _QuotationScreenState extends State<QuotationScreen> {
     return (price * qty - discount).clamp(0.0, double.infinity);
   }
 
-  void _updateItem(int index, {String? quantity, String? price, String? discountPercent, String? discountAmount, String? uom}) {
+  void _updateItem(int index, {String? quantity, String? discountPercent, String? discountAmount, String? uom}) {
     setState(() {
       final item = _selectedItems[index];
-
+      
       if (quantity != null) {
         item['quantity'] = int.tryParse(quantity) ?? 1;
         if (item['quantity'] <= 0) {
@@ -513,18 +453,14 @@ class _QuotationScreenState extends State<QuotationScreen> {
           return;
         }
       }
-
-      if (price != null) {
-        item['price_list_rate'] = double.tryParse(price) ?? 0.0;
-      }
-
-      final currentPrice = item['price_list_rate'] as double;
+      
+      final price = item['price_list_rate'] as double;
       final currentQty = item['quantity'] as int;
-
+      
       if (discountPercent != null) {
         final percent = double.tryParse(discountPercent) ?? 0.0;
         item['discount_percent'] = percent;
-        final newDiscountAmount = (currentPrice * currentQty * percent / 100);
+        final newDiscountAmount = (price * currentQty * percent / 100);
         item['discount_amount'] = newDiscountAmount;
         final newText = newDiscountAmount.toStringAsFixed(2);
         item['discountAmountController'].value = TextEditingValue(
@@ -533,7 +469,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
         );
       } else if (discountAmount != null) {
         final amount = double.tryParse(discountAmount) ?? 0.0;
-        final subtotal = currentPrice * currentQty;
+        final subtotal = price * currentQty;
         item['discount_amount'] = amount;
         final newDiscountPercent = subtotal > 0 ? (amount / subtotal * 100) : 0.0;
         item['discount_percent'] = newDiscountPercent;
@@ -542,53 +478,36 @@ class _QuotationScreenState extends State<QuotationScreen> {
           text: newText,
           selection: TextSelection.collapsed(offset: newText.length),
         );
-      } else if (price != null || quantity != null) {
-        final percent = item['discount_percent'] as double;
-        final newDiscountAmount = (currentPrice * currentQty * percent / 100);
-        item['discount_amount'] = newDiscountAmount;
-        final newText = newDiscountAmount.toStringAsFixed(2);
-        item['discountAmountController'].value = TextEditingValue(
-          text: newText,
-          selection: TextSelection.collapsed(offset: newText.length),
-        );
       }
-
+      
       if (uom != null) item['selectedUom'] = uom;
-
+      
       item['amount'] = _calculateItemAmount(item);
       _performCalculations();
     });
   }
 
   void _removeItem(int index) {
-    if (index < 0 || index >= _selectedItems.length) {
-      return;
-    }
+    if (index < 0 || index >= _selectedItems.length) return;
 
     setState(() {
       final itemCodeToRemove = _selectedItems[index]['item_code'];
 
-      _selectedItems[index]['priceController']?.dispose();
       _selectedItems[index]['quantityController']?.dispose();
       _selectedItems[index]['discountPercentController']?.dispose();
       _selectedItems[index]['discountAmountController']?.dispose();
-
+      
       _selectedItems.removeAt(index);
 
-      final taxesToKeep = <Map<String, dynamic>>[];
-      final taxesToRemove = <Map<String, dynamic>>[];
+      final taxesToKeep = <TaxRow>[];
+      final taxesToRemove = <TaxRow>[];
 
       for (final tax in _customTaxes) {
-        final bool isManual = tax['is_manual'] ?? false;
-
-        if (isManual) {
+        if (tax.isManual) {
           taxesToKeep.add(tax);
         } else {
-          final sources = List<String>.from(tax['source_item_codes'] ?? []);
-          sources.remove(itemCodeToRemove);
-
-          if (sources.isNotEmpty) {
-            tax['source_item_codes'] = sources;
+          tax.sourceItemCodes.remove(itemCodeToRemove);
+          if (tax.sourceItemCodes.isNotEmpty) {
             taxesToKeep.add(tax);
           } else {
             taxesToRemove.add(tax);
@@ -597,96 +516,74 @@ class _QuotationScreenState extends State<QuotationScreen> {
       }
 
       for (final tax in taxesToRemove) {
-        try {
-          tax['rateController']?.dispose();
-          tax['amountController']?.dispose();
-          tax['descriptionController']?.dispose();
-          tax['accountHeadController']?.dispose();
-        } catch (e) {
-          print('Error disposing tax controllers: $e');
-        }
+        tax.dispose();
       }
 
       _customTaxes = taxesToKeep;
+      
       _performCalculations();
     });
   }
 
   void _addCustomTaxRow() {
     setState(() {
-      final newTax = _createNewTaxRow(
-        chargeType: 'Actual',
+      final newTax = TaxRow(
+        chargeType: 'On Net Total',
         accountHead: null,
         description: '',
         rate: 0.0,
         isManual: true,
+        sourceItemCodes: [],
       );
       _customTaxes.add(newTax);
     });
   }
 
   void _updateCustomTaxRow(int index, {String? type, String? accountHead, String? rate}) {
-    if (index < 0 || index >= _customTaxes.length) {
-      return;
-    }
+    if (index < 0 || index >= _customTaxes.length) return;
 
     setState(() {
       final tax = _customTaxes[index];
-
+      
       if (type != null) {
-        tax['charge_type'] = type;
+        tax.chargeType = type;
         if (type == 'Actual') {
-          tax['rate'] = 0.0;
-          tax['rateController'].text = '0.00';
+          tax.rate = 0.0;
+          tax.rateController.text = '0.00';
         }
       }
-
+      
       if (accountHead != null) {
-        tax['account_head'] = accountHead;
-        final selectedAccount = _accountHeads.firstWhere(
-          (acc) => acc['name'] == accountHead,
-          orElse: () => {'account_name': accountHead},
-        );
+        tax.accountHead = accountHead;
+        final selectedAccount = _accountHeads.firstWhere((acc) => acc['name'] == accountHead, orElse: () => {'account_name': accountHead});
         final accountName = selectedAccount['account_name'] ?? accountHead;
-        tax['description'] = accountName;
-        tax['descriptionController'].text = accountName;
-        tax['accountHeadController'].text = accountName;
+        tax.description = accountName;
+        tax.descriptionController.text = accountName;
+        tax.accountHeadController.text = accountName;
       }
-
+      
       if (rate != null) {
         final rateValue = double.tryParse(rate) ?? 0.0;
-        tax['rate'] = rateValue;
+        tax.rate = rateValue;
       }
-
+      
       _performCalculations();
     });
   }
 
   void _removeCustomTaxRow(int index) {
     _removeOverlay();
-
+    
     setState(() {
-      if (index < 0 || index >= _customTaxes.length) {
-        return;
-      }
+      if (index < 0 || index >= _customTaxes.length) return;
 
       final tax = _customTaxes[index];
-      final bool isManual = tax['is_manual'] ?? false;
-      final String? accountHead = tax['account_head'];
 
-      if (!isManual && accountHead != null && accountHead.isNotEmpty) {
-        _manuallyRemovedTaxes.add(accountHead);
+      if (!tax.isManual && tax.accountHead != null && tax.accountHead!.isNotEmpty) {
+        _manuallyRemovedTaxes.add(tax.accountHead!);
       }
 
-      try {
-        tax['rateController']?.dispose();
-        tax['amountController']?.dispose();
-        tax['descriptionController']?.dispose();
-        tax['accountHeadController']?.dispose();
-      } catch (e) {
-        print('Error disposing controllers: $e');
-      }
-
+      tax.dispose();
       _customTaxes.removeAt(index);
 
       if (_activeTaxDropdownIndex != null) {
@@ -716,23 +613,19 @@ class _QuotationScreenState extends State<QuotationScreen> {
   void _showAccountHeadOverlay(BuildContext context, int taxIndex) {
     if (_accountHeads.isEmpty) {
       if (!mounted) return;
-      showErrorDialog(context, 'No Account Heads', 'No account heads available. Please check the API connection.');
+      showErrorDialog(context, 'No Account Heads', 'No account heads available.');
       return;
     }
-
+    
     _removeOverlay();
-    setState(() {
-      _activeTaxDropdownIndex = taxIndex;
-    });
+    setState(() => _activeTaxDropdownIndex = taxIndex);
 
     final taxData = _customTaxes[taxIndex];
-    final targetKey = taxData['targetKey'] as GlobalKey?;
-    final layerLink = taxData['layerLink'] as LayerLink;
-    final targetContext = targetKey?.currentContext;
+    final targetContext = taxData.targetKey.currentContext;
 
     if (targetContext == null) {
       if (!mounted) return;
-      showErrorDialog(context, 'Render Error', 'Cannot display dropdown due to rendering issue.');
+      showErrorDialog(context, 'Render Error', 'Cannot display dropdown.');
       return;
     }
 
@@ -753,7 +646,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
           Positioned(
             width: size.width,
             child: CompositedTransformFollower(
-              link: layerLink,
+              link: taxData.layerLink,
               showWhenUnlinked: false,
               offset: Offset(0, size.height),
               child: Material(
@@ -792,11 +685,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
                                   final account = _filteredAccountHeads[index];
                                   final accountName = account['account_name'] ?? account['name'] ?? 'Unknown';
                                   return ListTile(
-                                    title: Text(
-                                      accountName,
-                                      style: const TextStyle(fontSize: 14),
-                                      overflow: TextOverflow.ellipsis,
-                                    ),
+                                    title: Text(accountName, style: const TextStyle(fontSize: 14), overflow: TextOverflow.ellipsis),
                                     onTap: () {
                                       _updateCustomTaxRow(taxIndex, accountHead: account['name']);
                                       _removeOverlay();
@@ -814,7 +703,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
         ],
       ),
     );
-
+    
     if (mounted) {
       Overlay.of(context).insert(_overlayEntry!);
     }
@@ -833,122 +722,58 @@ class _QuotationScreenState extends State<QuotationScreen> {
     _overlayEntry?.markNeedsBuild();
   }
 
-  // --- START: NEW HELPER FOR ADDITIONAL DISCOUNT ---
-  /// Updates the additional discount amount/percentage fields in relation to each other.
-  void _updateAdditionalDiscount({required bool fromPercent}) {
-    // Determine the base amount for the discount calculation.
-    double subtotal = _cachedTotalAmount;
-    double taxTotal = _calculatedTaxes.fold(0.0, (sum, tax) => sum + (tax['tax_amount'] as double));
-    double baseForDiscount = _applyDiscountOn == 'Net Total' ? subtotal : subtotal + taxTotal;
-
-    if (fromPercent) {
-      final percent = double.tryParse(_additionalDiscountPercentageController.text) ?? 0.0;
-      final newAmount = (baseForDiscount * percent / 100);
-      final newText = newAmount.toStringAsFixed(2);
-      // Update the amount controller's text without triggering its own listener logic.
-      _additionalDiscountAmountController.value = TextEditingValue(
-        text: newText,
-        selection: TextSelection.collapsed(offset: newText.length),
-      );
-    } else { // Calculation is from the amount field
-      final amount = double.tryParse(_additionalDiscountAmountController.text) ?? 0.0;
-      final newPercent = baseForDiscount > 0 ? (amount / baseForDiscount * 100) : 0.0;
-      final newText = newPercent.toStringAsFixed(2);
-      // Update the percentage controller's text.
-      _additionalDiscountPercentageController.value = TextEditingValue(
-        text: newText,
-        selection: TextSelection.collapsed(offset: newText.length),
-      );
-    }
-
-    // Trigger a state update to recalculate all totals.
-    setState(() {
-      _performCalculations();
-    });
-  }
-  // --- END: NEW HELPER FOR ADDITIONAL DISCOUNT ---
-
-  // MODIFIED: Calculation logic is updated to handle discounts correctly.
   void _performCalculations() {
     _cachedTotalQuantity = _selectedItems.fold(0, (sum, item) => sum + (item['quantity'] as int));
-    // This is the pure item total, which we will now label as "Total"
     _cachedTotalAmount = _selectedItems.fold(0.0, (sum, item) => sum + (item['amount'] as double));
-
-    final double additionalDiscountAmountInput = double.tryParse(_additionalDiscountAmountController.text) ?? 0.0;
-    
-    double taxBaseAmount;
-    double finalDiscountAmount = additionalDiscountAmountInput;
-
-    // Determine the base for tax calculation
-    if (_applyDiscountOn == 'Net Total') {
-      taxBaseAmount = _cachedTotalAmount - additionalDiscountAmountInput;
-    } else { // 'Grand Total'
-      taxBaseAmount = _cachedTotalAmount;
-    }
-    
-    if (taxBaseAmount < 0) taxBaseAmount = 0;
-    _cachedNetTotal = taxBaseAmount;
 
     List<Map<String, dynamic>> tempCalculatedTaxes = [];
     double grandTotalTax = 0.0;
 
     for (var tax in _customTaxes) {
-      final String chargeType = tax['charge_type'] ?? 'On Net Total';
+      double taxableAmount = 0.0;
       double taxAmountForComponent = 0.0;
       double valueToSaveForBackend;
-      
-      // The taxable amount is now the calculated taxBaseAmount for most tax types
-      double taxableAmount = taxBaseAmount; 
-      
-      if (chargeType == 'Actual') {
-        taxAmountForComponent = double.tryParse(tax['amountController'].text) ?? 0.0;
-        valueToSaveForBackend = taxAmountForComponent;
-        if (tax['rateController'].text != '0.00') tax['rateController'].text = '0.00';
-        tax['rate'] = 0.0;
+
+      if (!tax.isManual) {
+        for (var item in _selectedItems) {
+          if (tax.sourceItemCodes.contains(item['item_code'])) {
+            taxableAmount += (item['amount'] as double);
+          }
+        }
       } else {
-        double inputRate = double.tryParse(tax['rateController'].text) ?? tax['rate'] ?? 0.0;
-        if (chargeType == 'On Item Quantity') {
-          // This should still be based on quantity, not a monetary value
-          taxAmountForComponent = inputRate * _cachedTotalQuantity;
-          valueToSaveForBackend = inputRate;
-        } else {
-          // All other types are based on the monetary value
-          taxAmountForComponent = (taxableAmount * inputRate / 100);
-          valueToSaveForBackend = inputRate;
-        }
-        final newText = taxAmountForComponent.toStringAsFixed(2);
-        if (tax['amountController'].text != newText) {
-          tax['amountController'].value = TextEditingValue(
-            text: newText,
-            selection: TextSelection.collapsed(offset: newText.length),
-          );
-        }
+        taxableAmount = _cachedTotalAmount;
       }
+
+      double inputRate = double.tryParse(tax.rateController.text) ?? tax.rate;
+
+      if (tax.chargeType == 'Actual') {
+        taxAmountForComponent = inputRate;
+        valueToSaveForBackend = taxAmountForComponent;
+      } else {
+        taxAmountForComponent = (taxableAmount * inputRate / 100);
+        valueToSaveForBackend = inputRate;
+      }
+
+      final newText = taxAmountForComponent.toStringAsFixed(2);
+      tax.amountController.value = TextEditingValue(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newText.length),
+      );
 
       grandTotalTax += taxAmountForComponent;
 
       tempCalculatedTaxes.add({
-        'description': tax['description'],
-        'charge_type': chargeType,
-        'account_head': tax['account_head'],
+        'description': tax.description,
+        'charge_type': tax.chargeType,
+        'account_head': tax.accountHead,
         'tax_amount': taxAmountForComponent,
         'rate': valueToSaveForBackend,
       });
     }
 
     _calculatedTaxes = tempCalculatedTaxes;
-    _cachedAdditionalDiscount = finalDiscountAmount;
-
-    // Calculate Grand Total
-    if (_applyDiscountOn == 'Net Total') {
-      // Discount was already subtracted to get taxBaseAmount
-      _cachedGrandTotal = taxBaseAmount + grandTotalTax;
-    } else { // 'Grand Total'
-      // Subtract discount now from the grand total
-      _cachedGrandTotal = _cachedTotalAmount + grandTotalTax - finalDiscountAmount;
-    }
-}
-
+    _cachedGrandTotal = _cachedTotalAmount + grandTotalTax;
+  }
 
   Future<void> _selectDate(BuildContext context) async {
     final picked = await showDatePicker(
@@ -962,27 +787,22 @@ class _QuotationScreenState extends State<QuotationScreen> {
 
   Future<void> _saveQuotation() async {
     _removeOverlay();
-    if (!mounted) return;
-
-    if (!_formKey.currentState!.validate()) return;
-
+    if (!mounted || !_formKey.currentState!.validate()) return;
+    
     if (_selectedCustomer == null) {
       showErrorDialog(context, 'Validation Error', 'Please select a customer.');
       return;
     }
-
     if (_selectedSalesperson == null) {
       showErrorDialog(context, 'Validation Error', 'Please select a salesperson.');
       return;
     }
-
     if (_selectedItems.isEmpty) {
       showErrorDialog(context, 'Validation Error', 'Please add at least one item.');
       return;
     }
-
     for (var tax in _customTaxes) {
-      if (tax['account_head'] == null || tax['account_head'].isEmpty) {
+      if (tax.accountHead == null || tax.accountHead!.isEmpty) {
         showErrorDialog(context, 'Validation Error', 'Please select an account head for all tax rows.');
         return;
       }
@@ -1006,22 +826,12 @@ class _QuotationScreenState extends State<QuotationScreen> {
         }).toList();
 
     final taxesToSave = _calculatedTaxes.map((tax) {
-      if (tax['charge_type'] == 'Actual') {
-        return {
-          'account_head': tax['account_head'],
-          'charge_type': tax['charge_type'],
-          'description': tax['description'],
-          'tax_amount': tax['tax_amount'],
-          'rate': 0,
-        };
-      } else {
-        return {
-          'account_head': tax['account_head'],
-          'charge_type': tax['charge_type'],
-          'description': tax['description'],
-          'rate': tax['rate'],
-        };
-      }
+      return {
+        'account_head': tax['account_head'],
+        'charge_type': tax['charge_type'],
+        'description': tax['description'],
+        'rate': tax['rate'],
+      };
     }).toList();
 
     final Map<String, dynamic> quotationData = {
@@ -1038,51 +848,22 @@ class _QuotationScreenState extends State<QuotationScreen> {
       'naming_series': _namingSeries,
       'selling_price_list': _sellingPriceList,
       'currency': _currency,
-      if (_currentUserEmail != null) 'user': _currentUserEmail,
-      if (widget.initialData != null && widget.initialData!['name'] != null) 'name': widget.initialData!['name'],
-
-      // --- START: ADD NEW DISCOUNT FIELDS TO PAYLOAD ---
-      'apply_discount_on': _applyDiscountOn,
-      'additional_discount_percentage': double.tryParse(_additionalDiscountPercentageController.text) ?? 0.0,
-      'discount_amount': _cachedAdditionalDiscount, // This is the final calculated discount amount
-      // --- END: ADD NEW DISCOUNT FIELDS TO PAYLOAD ---
+      if (widget.initialData != null && widget.initialData!['name'] != null)
+        'name': widget.initialData!['name'],
     };
 
     try {
       final http.Response response;
       if (widget.initialData == null || widget.initialData!['name'] == null) {
-        response = await retry(
-          () => http.post(
-            Uri.parse("${widget.serverUrl}/api/resource/Quotation"),
-            headers: _getHeaders(),
-            body: json.encode({"data": quotationData}),
-          ),
-          maxAttempts: 3,
-          delayFactor: const Duration(seconds: 1),
-        );
+        response = await retry(() => http.post(Uri.parse("${widget.serverUrl}/api/resource/Quotation"), headers: _getHeaders(), body: json.encode({"data": quotationData})), maxAttempts: 3);
       } else {
-        response = await retry(
-          () => http.put(
-            Uri.parse("${widget.serverUrl}/api/resource/Quotation/${widget.initialData!['name']}"),
-            headers: _getHeaders(),
-            body: json.encode({"data": quotationData}),
-          ),
-          maxAttempts: 3,
-          delayFactor: const Duration(seconds: 1),
-        );
+        response = await retry(() => http.put(Uri.parse("${widget.serverUrl}/api/resource/Quotation/${widget.initialData!['name']}"), headers: _getHeaders(), body: json.encode({"data": quotationData})), maxAttempts: 3);
       }
 
       if (!mounted) return;
 
       if (response.statusCode == 200 || response.statusCode == 201) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              widget.initialData == null ? 'Quotation created successfully!' : 'Quotation updated successfully!',
-            ),
-            backgroundColor: Colors.green,
-          ),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(widget.initialData == null ? 'Quotation created successfully!' : 'Quotation updated successfully!'), backgroundColor: Colors.green));
         Navigator.pop(context, true);
       } else {
         showApiErrorDialog(context, statusCode: response.statusCode, message: response.body);
@@ -1100,10 +881,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
     return Scaffold(
       backgroundColor: const Color(0xFFE0F7FA),
       appBar: AppBar(
-        title: Text(
-          widget.initialData == null ? 'Create Quotation' : 'Edit Quotation',
-          style: const TextStyle(fontFamily: 'Dubai', color: Colors.white),
-        ),
+        title: Text(widget.initialData == null ? 'Create Quotation' : 'Edit Quotation', style: const TextStyle(fontFamily: 'Dubai', color: Colors.white)),
         backgroundColor: Theme.of(context).primaryColor,
         foregroundColor: Colors.white,
       ),
@@ -1140,10 +918,6 @@ class _QuotationScreenState extends State<QuotationScreen> {
                     ),
                   ),
                   const SizedBox(height: 8),
-                  // --- START: ADDED NEW DISCOUNT SECTION ---
-                  _buildAdditionalDiscountSection(),
-                  // --- END: ADDED NEW DISCOUNT SECTION ---
-                  const SizedBox(height: 8),
                   _buildTotalsCard(),
                   const SizedBox(height: 16),
                   _buildSaveButton(),
@@ -1156,13 +930,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
   Widget _buildSectionHeader(BuildContext context, String title) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6.0),
-      child: Text(
-        title,
-        style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              color: Theme.of(context).primaryColor,
-              fontWeight: FontWeight.bold,
-            ),
-      ),
+      child: Text(title, style: Theme.of(context).textTheme.titleLarge?.copyWith(color: Theme.of(context).primaryColor, fontWeight: FontWeight.bold)),
     );
   }
 
@@ -1176,9 +944,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
           children: [
             const Icon(Icons.calendar_today, color: Color(0xFF005BAC)),
             const SizedBox(width: 6),
-            Expanded(
-              child: Text(DateFormat('yyyy-MM-dd').format(_transactionDate)),
-            ),
+            Expanded(child: Text(DateFormat('yyyy-MM-dd').format(_transactionDate))),
           ],
         ),
       ),
@@ -1192,10 +958,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
           child: GestureDetector(
             onTap: () async {
               _removeOverlay();
-              final selected = await showSearch(
-                context: context,
-                delegate: CustomerSearchDelegate(_customersList),
-              );
+              final selected = await showSearch(context: context, delegate: CustomerSearchDelegate(_customersList));
               if (!mounted) return;
               if (selected != null) {
                 setState(() {
@@ -1212,12 +975,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
                 children: [
                   const Icon(Icons.person, color: Color(0xFF005BAC)),
                   const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      _selectedCustomer?['customer_name'] ?? 'Select Customer',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
+                  Expanded(child: Text(_selectedCustomer?['customer_name'] ?? 'Select Customer', overflow: TextOverflow.ellipsis)),
                   const Icon(Icons.arrow_drop_down, color: Colors.grey),
                 ],
               ),
@@ -1228,22 +986,13 @@ class _QuotationScreenState extends State<QuotationScreen> {
           icon: const Icon(Icons.add_circle_outline, color: Color(0xFF005BAC), size: 25),
           onPressed: () async {
             _removeOverlay();
-            final newCustomer = await showDialog<Map<String, dynamic>>(
-              context: context,
-              builder: (context) => CustomerCreationDialog(
-                serverUrl: widget.serverUrl,
-                sid: widget.sid,
-              ),
-            );
+            final newCustomer = await showDialog<Map<String, dynamic>>(context: context, builder: (context) => CustomerCreationDialog(serverUrl: widget.serverUrl, sid: widget.sid));
             if (!mounted) return;
             if (newCustomer != null) {
               await _fetchCustomers();
               if (!mounted) return;
               setState(() {
-                _selectedCustomer = _customersList.firstWhere(
-                  (c) => c['name'] == newCustomer['name'],
-                  orElse: () => newCustomer,
-                );
+                _selectedCustomer = _customersList.firstWhere((c) => c['name'] == newCustomer['name'], orElse: () => newCustomer);
                 _selectedTaxCategory = newCustomer['tax_category'] ?? 'Inter State';
                 _performCalculations();
               });
@@ -1258,15 +1007,11 @@ class _QuotationScreenState extends State<QuotationScreen> {
     return DropdownButtonFormField<String>(
       value: _selectedTaxCategory,
       decoration: _inputDecoration('Tax Category'),
-      items: _taxCategoryOptions.map((String category) {
-        return DropdownMenuItem<String>(value: category, child: Text(category));
-      }).toList(),
-      onChanged: (newValue) {
-        setState(() {
-          _selectedTaxCategory = newValue!;
-          _performCalculations();
-        });
-      },
+      items: _taxCategoryOptions.map((String category) => DropdownMenuItem<String>(value: category, child: Text(category))).toList(),
+      onChanged: (newValue) => setState(() {
+        _selectedTaxCategory = newValue!;
+        _performCalculations();
+      }),
       validator: (value) => value == null ? 'Tax category is required' : null,
     );
   }
@@ -1275,10 +1020,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
     return GestureDetector(
       onTap: () async {
         _removeOverlay();
-        final selected = await showSearch(
-          context: context,
-          delegate: SalespersonSearchDelegate(_salespersonsList),
-        );
+        final selected = await showSearch(context: context, delegate: SalespersonSearchDelegate(_salespersonsList));
         if (!mounted) return;
         if (selected != null) setState(() => _selectedSalesperson = selected);
       },
@@ -1289,12 +1031,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
           children: [
             const Icon(Icons.people_alt, color: Color(0xFF005BAC)),
             const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                _selectedSalesperson?['salesperson_name'] ?? 'Select Salesperson',
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
+            Expanded(child: Text(_selectedSalesperson?['salesperson_name'] ?? 'Select Salesperson', overflow: TextOverflow.ellipsis)),
             const Icon(Icons.arrow_drop_down, color: Colors.grey),
           ],
         ),
@@ -1302,94 +1039,25 @@ class _QuotationScreenState extends State<QuotationScreen> {
     );
   }
 
-  // --- START: NEW WIDGET FOR ADDITIONAL DISCOUNT SECTION ---
-  Widget _buildAdditionalDiscountSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _buildSectionHeader(context, 'Additional Discount'),
-        DropdownButtonFormField<String>(
-          value: _applyDiscountOn,
-          decoration: _inputDecoration('Apply Additional Discount On'),
-          items: ['Grand Total', 'Net Total'].map((String value) {
-            return DropdownMenuItem<String>(value: value, child: Text(value));
-          }).toList(),
-          onChanged: (newValue) {
-            if (newValue != null) {
-              setState(() {
-                _applyDiscountOn = newValue;
-                // Recalculate discount relationship when the base changes
-                _updateAdditionalDiscount(fromPercent: true);
-              });
-            }
-          },
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: TextFormField(
-                controller: _additionalDiscountPercentageController,
-                focusNode: _additionalDiscountPercentFocus,
-                decoration: _inputDecoration('Discount Percentage'),
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: TextFormField(
-                controller: _additionalDiscountAmountController,
-                focusNode: _additionalDiscountAmountFocus,
-                decoration: _inputDecoration('Discount Amount (INR)'),
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-  // --- END: NEW WIDGET FOR ADDITIONAL DISCOUNT SECTION ---
-
   Widget _buildTaxesTable() {
     if (_customTaxes.isEmpty) {
       return Container(
         padding: const EdgeInsets.all(16.0),
-        decoration: BoxDecoration(
-          border: Border.all(color: Colors.grey.shade300),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: const Center(
-          child: Text(
-            'No taxes added yet',
-            style: TextStyle(color: Colors.grey, fontSize: 14),
-          ),
-        ),
+        decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(8)),
+        child: const Center(child: Text('No taxes added yet', style: TextStyle(color: Colors.grey, fontSize: 14))),
       );
     }
 
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
       child: Container(
-        decoration: BoxDecoration(
-          border: Border.all(color: Colors.grey.shade300),
-          borderRadius: BorderRadius.circular(8),
-        ),
+        decoration: BoxDecoration(border: Border.all(color: Colors.grey.shade300), borderRadius: BorderRadius.circular(8)),
         child: Table(
           defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-          columnWidths: const {
-            0: FixedColumnWidth(120),
-            1: FixedColumnWidth(180),
-            2: FixedColumnWidth(140),
-            3: FixedColumnWidth(80),
-            4: FixedColumnWidth(80),
-            5: FixedColumnWidth(60),
-          },
+          columnWidths: const {0: FixedColumnWidth(120), 1: FixedColumnWidth(180), 2: FixedColumnWidth(140), 3: FixedColumnWidth(80), 4: FixedColumnWidth(80), 5: FixedColumnWidth(60)},
           children: [
             _buildTaxTableHeader(),
-            ..._customTaxes.asMap().entries.map(
-                  (entry) => _buildTaxTableRow(entry.key, entry.value),
-                ),
+            ..._customTaxes.asMap().entries.map((entry) => _buildTaxTableRow(entry.key, entry.value)),
           ],
         ),
       ),
@@ -1399,13 +1067,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
   TableRow _buildTaxTableHeader() {
     const style = TextStyle(fontWeight: FontWeight.bold, fontSize: 12);
     return const TableRow(
-      decoration: BoxDecoration(
-        color: Color(0xFFB3E5FC),
-        borderRadius: BorderRadius.only(
-          topLeft: Radius.circular(8),
-          topRight: Radius.circular(8),
-        ),
-      ),
+      decoration: BoxDecoration(color: Color(0xFFB3E5FC), borderRadius: BorderRadius.only(topLeft: Radius.circular(8), topRight: Radius.circular(8))),
       children: [
         Padding(padding: EdgeInsets.all(8.0), child: Text('Type', style: style, textAlign: TextAlign.center)),
         Padding(padding: EdgeInsets.all(8.0), child: Text('Account Head', style: style, textAlign: TextAlign.center)),
@@ -1417,16 +1079,13 @@ class _QuotationScreenState extends State<QuotationScreen> {
     );
   }
 
-  TableRow _buildTaxTableRow(int index, Map<String, dynamic> tax) {
-    bool isManual = tax['is_manual'] ?? (tax['source_item_codes'] as List? ?? []).isEmpty;
-    final String chargeType = tax['charge_type'] ?? 'On Net Total';
-
+  TableRow _buildTaxTableRow(int index, TaxRow tax) {
     return TableRow(
       children: [
         Padding(
           padding: const EdgeInsets.all(4.0),
           child: DropdownButtonFormField<String>(
-            value: tax['charge_type'],
+            value: tax.chargeType,
             decoration: _inputDecoration(null),
             isExpanded: true,
             items: _taxChargeTypes.map((t) => DropdownMenuItem(value: t, child: Text(t, style: const TextStyle(fontSize: 12), overflow: TextOverflow.ellipsis))).toList(),
@@ -1438,15 +1097,12 @@ class _QuotationScreenState extends State<QuotationScreen> {
         Padding(
           padding: const EdgeInsets.all(4.0),
           child: CompositedTransformTarget(
-            key: tax['targetKey'],
-            link: tax['layerLink']!,
+            key: tax.targetKey,
+            link: tax.layerLink,
             child: TextFormField(
-              controller: tax['accountHeadController'],
+              controller: tax.accountHeadController,
               readOnly: true,
-              decoration: _inputDecoration(null).copyWith(
-                errorText: tax['account_head'] == null ? 'Required' : null,
-                suffixIcon: const Icon(Icons.arrow_drop_down, color: Colors.grey),
-              ),
+              decoration: _inputDecoration(null).copyWith(errorText: tax.accountHead == null ? 'Required' : null, suffixIcon: const Icon(Icons.arrow_drop_down, color: Colors.grey)),
               onTap: () => _showAccountHeadOverlay(context, index),
             ),
           ),
@@ -1454,7 +1110,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
         Padding(
           padding: const EdgeInsets.all(4.0),
           child: TextFormField(
-            controller: tax['descriptionController'],
+            controller: tax.descriptionController,
             readOnly: true,
             decoration: _inputDecoration(null).copyWith(filled: true, fillColor: Colors.grey.shade200),
           ),
@@ -1462,35 +1118,24 @@ class _QuotationScreenState extends State<QuotationScreen> {
         Padding(
           padding: const EdgeInsets.all(4.0),
           child: TextFormField(
-            controller: tax['rateController'],
-            readOnly: chargeType == 'Actual' || !isManual,
-            decoration: _inputDecoration(null).copyWith(
-              filled: chargeType == 'Actual' || !isManual,
-              fillColor: chargeType == 'Actual' || !isManual ? Colors.grey.shade200 : Colors.white,
-            ),
+            controller: tax.rateController,
+            readOnly: !tax.isManual,
+            decoration: _inputDecoration(null).copyWith(filled: !tax.isManual, fillColor: !tax.isManual ? Colors.grey.shade200 : Colors.white),
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             textAlign: TextAlign.center,
             onChanged: (v) {
-              if (isManual) _updateCustomTaxRow(index, rate: v);
+              if (tax.isManual) _updateCustomTaxRow(index, rate: v);
             },
           ),
         ),
         Padding(
           padding: const EdgeInsets.all(4.0),
           child: TextFormField(
-            controller: tax['amountController'],
-            readOnly: chargeType != 'Actual',
-            decoration: _inputDecoration(null).copyWith(
-              filled: chargeType != 'Actual',
-              fillColor: chargeType != 'Actual' ? Colors.grey.shade200 : Colors.white,
-            ),
+            controller: tax.amountController,
+            readOnly: true,
+            decoration: _inputDecoration(null).copyWith(filled: true, fillColor: Colors.grey.shade200),
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             textAlign: TextAlign.center,
-            onChanged: (v) {
-              if (chargeType == 'Actual') {
-                setState(() => _performCalculations());
-              }
-            },
           ),
         ),
         Padding(
@@ -1500,13 +1145,13 @@ class _QuotationScreenState extends State<QuotationScreen> {
             child: IconButton(
               icon: Icon(Icons.delete_outline, color: Colors.red.shade600, size: 20),
               onPressed: () {
-                if (!isManual) {
+                if (!tax.isManual) {
                   showDialog(
                     context: context,
                     builder: (BuildContext context) {
                       return AlertDialog(
                         title: const Text('Delete Tax'),
-                        content: Text('Are you sure you want to delete "${tax['description']}"?\n\nThis tax was added automatically from an item.'),
+                        content: Text('Are you sure you want to delete "${tax.description}"?\n\nThis tax was added automatically from an item.'),
                         actions: [
                           TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Cancel')),
                           TextButton(
@@ -1539,10 +1184,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
           child: GestureDetector(
             onTap: () async {
               _removeOverlay();
-              final selected = await showSearch(
-                context: context,
-                delegate: ItemSearchDelegate(items: _itemsList, serverUrl: widget.serverUrl),
-              );
+              final selected = await showSearch(context: context, delegate: ItemSearchDelegate(items: _itemsList, serverUrl: widget.serverUrl));
               if (!mounted) return;
               if (selected != null) _addItemToResult(selected);
             },
@@ -1597,65 +1239,28 @@ class _QuotationScreenState extends State<QuotationScreen> {
                       )
                     else
                       const Icon(Icons.image_not_supported, size: 50, color: Colors.grey),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(item['item_name'], style: const TextStyle(fontWeight: FontWeight.bold)),
-                          Text('Code: ${item['item_code']}', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                          Text('Code: ${item['item_code']}', style: const TextStyle(color: Colors.grey)),
+                          Text('Price: ₹${(item['price_list_rate'] as double).toStringAsFixed(2)}'),
+                          const SizedBox(height: 6),
+                          Row(
+                            children: [
+                              Expanded(flex: 2, child: TextFormField(controller: item['quantityController'], decoration: _inputDecoration('Qty'), keyboardType: TextInputType.number, textAlign: TextAlign.center, onChanged: (v) => _updateItem(index, quantity: v))),
+                              const SizedBox(width: 4),
+                              Expanded(flex: 3, child: TextFormField(controller: item['discountPercentController'], decoration: _inputDecoration('Disc %'), keyboardType: const TextInputType.numberWithOptions(decimal: true), textAlign: TextAlign.center, onChanged: (v) => _updateItem(index, discountPercent: v))),
+                              const SizedBox(width: 4),
+                              Expanded(flex: 3, child: TextFormField(controller: item['discountAmountController'], decoration: _inputDecoration('Disc ₹'), keyboardType: const TextInputType.numberWithOptions(decimal: true), textAlign: TextAlign.center, onChanged: (v) => _updateItem(index, discountAmount: v))),
+                            ],
+                          ),
                         ],
                       ),
                     ),
-                    IconButton(
-                      icon: const Icon(Icons.delete, color: Colors.red),
-                      onPressed: () => _removeItem(index),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextFormField(
-                        controller: item['priceController'],
-                        decoration: _inputDecoration('Price ₹'),
-                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                        onChanged: (v) => _updateItem(index, price: v),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: TextFormField(
-                        controller: item['quantityController'],
-                        decoration: _inputDecoration('Qty'),
-                        keyboardType: TextInputType.number,
-                        textAlign: TextAlign.center,
-                        onChanged: (v) => _updateItem(index, quantity: v),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextFormField(
-                        controller: item['discountPercentController'],
-                        decoration: _inputDecoration('Discount %'),
-                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                        onChanged: (v) => _updateItem(index, discountPercent: v),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: TextFormField(
-                        controller: item['discountAmountController'],
-                        decoration: _inputDecoration('Discount ₹'),
-                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                        onChanged: (v) => _updateItem(index, discountAmount: v),
-                      ),
-                    ),
+                    IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: () => _removeItem(index)),
                   ],
                 ),
                 const SizedBox(height: 8),
@@ -1676,10 +1281,7 @@ class _QuotationScreenState extends State<QuotationScreen> {
                       flex: 3,
                       child: Align(
                         alignment: Alignment.centerRight,
-                        child: Text(
-                          'Amt: ₹${(item['amount'] as double).toStringAsFixed(2)}',
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                        ),
+                        child: Text('Amt: ₹${(item['amount'] as double).toStringAsFixed(2)}', style: const TextStyle(fontWeight: FontWeight.bold)),
                       ),
                     ),
                   ],
@@ -1692,45 +1294,16 @@ class _QuotationScreenState extends State<QuotationScreen> {
     );
   }
 
-  // MODIFIED: This widget now shows the new breakdown of totals.
   Widget _buildTotalsCard() {
-    bool hasDiscount = _cachedAdditionalDiscount > 0;
-    bool discountOnNetTotal = _applyDiscountOn == 'Net Total';
-
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12.0),
         child: Column(
           children: [
             _buildTotalRow('Total Quantity:', '$_cachedTotalQuantity'),
-            _buildTotalRow('Total:', '₹${_cachedTotalAmount.toStringAsFixed(2)}'),
-            
-            if (hasDiscount && discountOnNetTotal) ...[
-              _buildTotalRow(
-                'Additional Discount:',
-                '- ₹${_cachedAdditionalDiscount.toStringAsFixed(2)}',
-                isNegative: true,
-              ),
-              const Divider(),
-              _buildTotalRow('Net Total:', '₹${_cachedNetTotal.toStringAsFixed(2)}', isBold: true),
-            ],
-            
+            _buildTotalRow('Subtotal (Items):', '₹${_cachedTotalAmount.toStringAsFixed(2)}'),
             if (_calculatedTaxes.isNotEmpty) const Divider(),
-
-            ..._calculatedTaxes.map(
-              (tax) => _buildTotalRow(
-                '${tax['description']}:',
-                '₹${(tax['tax_amount'] as double).toStringAsFixed(2)}',
-              ),
-            ),
-            
-            if (hasDiscount && !discountOnNetTotal)
-              _buildTotalRow(
-                'Additional Discount:',
-                '- ₹${_cachedAdditionalDiscount.toStringAsFixed(2)}',
-                isNegative: true,
-              ),
-            
+            ..._calculatedTaxes.map((tax) => _buildTotalRow('${tax['description']}:', '₹${(tax['tax_amount'] as double).toStringAsFixed(2)}')),
             const Divider(),
             _buildTotalRow('Grand Total:', '₹${_cachedGrandTotal.toStringAsFixed(2)}', isBold: true),
           ],
@@ -1739,20 +1312,13 @@ class _QuotationScreenState extends State<QuotationScreen> {
     );
   }
 
-  Widget _buildTotalRow(String label, String value, {bool isBold = false, bool isNegative = false}) {
-    final style = TextStyle(
-      fontWeight: isBold ? FontWeight.bold : FontWeight.normal,
-      fontSize: isBold ? 16 : 14,
-      color: isNegative ? Colors.red.shade700 : null,
-    );
+  Widget _buildTotalRow(String label, String value, {bool isBold = false}) {
+    final style = TextStyle(fontWeight: isBold ? FontWeight.bold : FontWeight.normal, fontSize: isBold ? 16 : 14);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4.0),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(label, style: style),
-          Text(value, style: style),
-        ],
+        children: [Text(label, style: style), Text(value, style: style)],
       ),
     );
   }
@@ -1760,36 +1326,14 @@ class _QuotationScreenState extends State<QuotationScreen> {
   Widget _buildSaveButton() {
     return ElevatedButton(
       onPressed: _isLoading ? null : _saveQuotation,
-      style: ElevatedButton.styleFrom(
-        minimumSize: const Size(double.infinity, 45),
-        backgroundColor: Theme.of(context).primaryColor,
-        foregroundColor: Colors.white,
-        textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-      ),
+      style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 45), backgroundColor: Theme.of(context).primaryColor, foregroundColor: Colors.white, textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
       child: _isLoading ? const CircularProgressIndicator(color: Colors.white) : const Text('Save Quotation'),
     );
   }
 
-  InputDecoration _inputDecoration(String? label) => InputDecoration(
-        labelText: label,
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        filled: true,
-        fillColor: Colors.white,
-        isDense: true,
-      );
+  InputDecoration _inputDecoration(String? label) => InputDecoration(labelText: label, border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)), contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8), filled: true, fillColor: Colors.white, isDense: true);
 
-  BoxDecoration _boxDecoration() => BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(6),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 4,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      );
+  BoxDecoration _boxDecoration() => BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(6), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4, offset: const Offset(0, 2))]);
 }
 
 // Helper classes remain unchanged
@@ -1810,15 +1354,10 @@ class _CustomerCreationDialogState extends State<CustomerCreationDialog> {
   final List<String> _taxCategoryOptions = ['Inter State', 'Outer State'];
   bool _isSaving = false;
 
-  Map<String, String> _getHeaders() => {
-        'Cookie': 'sid=${widget.sid}',
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-      };
+  Map<String, String> _getHeaders() => {'Cookie': 'sid=${widget.sid}', 'Content-Type': 'application/json', 'Accept': 'application/json'};
 
   Future<void> _saveCustomer() async {
-    if (!mounted) return;
-    if (!_formKey.currentState!.validate()) return;
+    if (!mounted || !_formKey.currentState!.validate()) return;
     setState(() => _isSaving = true);
     try {
       final customerData = {
@@ -1828,23 +1367,13 @@ class _CustomerCreationDialogState extends State<CustomerCreationDialog> {
         if (_mobileNoController.text.isNotEmpty) 'mobile_no': _mobileNoController.text,
         if (_emailController.text.isNotEmpty) 'email_id': _emailController.text,
       };
-      final response = await retry(
-        () => http.post(
-          Uri.parse("${widget.serverUrl}/api/resource/Customer"),
-          headers: _getHeaders(),
-          body: json.encode({'data': customerData}),
-        ),
-        maxAttempts: 3,
-        delayFactor: const Duration(seconds: 1),
-      );
+      final response = await retry(() => http.post(Uri.parse("${widget.serverUrl}/api/resource/Customer"), headers: _getHeaders(), body: json.encode({'data': customerData})), maxAttempts: 3);
 
       if (!mounted) return;
 
       if (response.statusCode == 200) {
         final newCustomerData = json.decode(response.body)['data'];
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Customer created successfully!'), backgroundColor: Colors.green),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Customer created successfully!'), backgroundColor: Colors.green));
         Navigator.pop(context, newCustomerData);
       } else {
         showApiErrorDialog(context, statusCode: response.statusCode, message: response.body);
@@ -1875,11 +1404,7 @@ class _CustomerCreationDialogState extends State<CustomerCreationDialog> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextFormField(
-                controller: _customerNameController,
-                decoration: _inputDecoration('Customer Name *'),
-                validator: (v) => v!.isEmpty ? 'Required' : null,
-              ),
+              TextFormField(controller: _customerNameController, decoration: _inputDecoration('Customer Name *'), validator: (v) => v!.isEmpty ? 'Required' : null),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
                 value: _selectedTaxCategory,
@@ -1889,17 +1414,9 @@ class _CustomerCreationDialogState extends State<CustomerCreationDialog> {
                 validator: (value) => value == null ? 'Tax category is required' : null,
               ),
               const SizedBox(height: 12),
-              TextFormField(
-                controller: _mobileNoController,
-                decoration: _inputDecoration('Mobile No'),
-                keyboardType: TextInputType.phone,
-              ),
+              TextFormField(controller: _mobileNoController, decoration: _inputDecoration('Mobile No'), keyboardType: TextInputType.phone),
               const SizedBox(height: 12),
-              TextFormField(
-                controller: _emailController,
-                decoration: _inputDecoration('Email ID'),
-                keyboardType: TextInputType.emailAddress,
-              ),
+              TextFormField(controller: _emailController, decoration: _inputDecoration('Email ID'), keyboardType: TextInputType.emailAddress),
             ],
           ),
         ),
@@ -1914,11 +1431,7 @@ class _CustomerCreationDialogState extends State<CustomerCreationDialog> {
     );
   }
 
-  InputDecoration _inputDecoration(String? label) => InputDecoration(
-        labelText: label,
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
-        contentPadding: const EdgeInsets.all(10),
-      );
+  InputDecoration _inputDecoration(String? label) => InputDecoration(labelText: label, border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)), contentPadding: const EdgeInsets.all(10));
 }
 
 class CustomerSearchDelegate extends SearchDelegate<dynamic> {
@@ -1926,15 +1439,10 @@ class CustomerSearchDelegate extends SearchDelegate<dynamic> {
   CustomerSearchDelegate(this.customers);
 
   @override
-  List<Widget>? buildActions(BuildContext context) => [
-        IconButton(icon: const Icon(Icons.clear), onPressed: () => query = ''),
-      ];
+  List<Widget>? buildActions(BuildContext context) => [IconButton(icon: const Icon(Icons.clear), onPressed: () => query = '')];
 
   @override
-  Widget? buildLeading(BuildContext context) => IconButton(
-        icon: const Icon(Icons.arrow_back),
-        onPressed: () => close(context, null),
-      );
+  Widget? buildLeading(BuildContext context) => IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => close(context, null));
 
   @override
   Widget buildResults(BuildContext context) {
@@ -1961,15 +1469,10 @@ class SalespersonSearchDelegate extends SearchDelegate<dynamic> {
   SalespersonSearchDelegate(this.salespersons);
 
   @override
-  List<Widget>? buildActions(BuildContext context) => [
-        IconButton(icon: const Icon(Icons.clear), onPressed: () => query = ''),
-      ];
+  List<Widget>? buildActions(BuildContext context) => [IconButton(icon: const Icon(Icons.clear), onPressed: () => query = '')];
 
   @override
-  Widget? buildLeading(BuildContext context) => IconButton(
-        icon: const Icon(Icons.arrow_back),
-        onPressed: () => close(context, null),
-      );
+  Widget? buildLeading(BuildContext context) => IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => close(context, null));
 
   @override
   Widget buildResults(BuildContext context) {
@@ -1993,21 +1496,14 @@ class ItemSearchDelegate extends SearchDelegate<dynamic> {
   ItemSearchDelegate({required this.items, required this.serverUrl});
 
   @override
-  List<Widget>? buildActions(BuildContext context) => [
-        IconButton(icon: const Icon(Icons.clear), onPressed: () => query = ''),
-      ];
+  List<Widget>? buildActions(BuildContext context) => [IconButton(icon: const Icon(Icons.clear), onPressed: () => query = '')];
 
   @override
-  Widget? buildLeading(BuildContext context) => IconButton(
-        icon: const Icon(Icons.arrow_back),
-        onPressed: () => close(context, null),
-      );
+  Widget? buildLeading(BuildContext context) => IconButton(icon: const Icon(Icons.arrow_back), onPressed: () => close(context, null));
 
   @override
   Widget buildResults(BuildContext context) {
-    final results = items
-        .where((item) => (item['item_name']?.toString().toLowerCase() ?? '').contains(query.toLowerCase()) || (item['item_code']?.toString().toLowerCase() ?? '').contains(query.toLowerCase()))
-        .toList();
+    final results = items.where((item) => (item['item_name']?.toString().toLowerCase() ?? '').contains(query.toLowerCase()) || (item['item_code']?.toString().toLowerCase() ?? '').contains(query.toLowerCase())).toList();
     return ListView.builder(
       itemCount: results.length,
       itemBuilder: (context, index) {

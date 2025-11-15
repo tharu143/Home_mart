@@ -6,12 +6,36 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
-import 'package:pdf/pdf.dart'; // For PdfColor, PdfPageFormat
+import 'package:pdf/pdf.dart'; // For PdfColor
 import 'package:pdf/widgets.dart' as pw;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:printing/printing.dart';
 import 'package:retry/retry.dart';
-import 'package:home_mart/error_handler.dart'; // Assumed to contain error dialog functions
+
+// --- Mock Error Handler ---
+// This is a placeholder for your actual error handler functions.
+void showApiErrorDialog(BuildContext context, {required int statusCode, required String message}) {
+  showDialog(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('API Error: $statusCode'),
+      content: SingleChildScrollView(child: Text(message)),
+      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK'))],
+    ),
+  );
+}
+
+void showErrorDialog(BuildContext context, String title, String message) {
+  showDialog(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(title),
+      content: Text(message),
+      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK'))],
+    ),
+  );
+}
+// --- End Mock Error Handler ---
 
 class QuotationDetailScreen extends StatefulWidget {
   final String serverUrl;
@@ -48,7 +72,6 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
   double _cachedTotalAmount = 0.0;
   double _cachedGrandTotal = 0.0;
   int _cachedTotalQuantity = 0;
-  double _cachedNetTotal = 0.0; // ADDED for new calculation logic
   List<Map<String, dynamic>> _calculatedTaxes = [];
   final String _namingSeries = 'SAL-QTN-.YYYY';
   final String _sellingPriceList = 'Standard Selling';
@@ -62,31 +85,9 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
   List<dynamic> _filteredAccountHeads = [];
   int? _activeTaxDropdownIndex;
 
-  // --- START: STATE FOR ADDITIONAL DISCOUNT ---
-  String _applyDiscountOn = 'Grand Total';
-  final _additionalDiscountPercentageController = TextEditingController();
-  final _additionalDiscountAmountController = TextEditingController();
-  final _additionalDiscountPercentFocus = FocusNode();
-  final _additionalDiscountAmountFocus = FocusNode();
-  double _cachedAdditionalDiscount = 0.0;
-  // --- END: STATE FOR ADDITIONAL DISCOUNT ---
-
   @override
   void initState() {
     super.initState();
-    // --- START: ADD LISTENERS FOR DISCOUNT FIELDS ---
-    _additionalDiscountPercentageController.addListener(() {
-      if (_additionalDiscountPercentFocus.hasFocus) {
-        _updateAdditionalDiscount(fromPercent: true);
-      }
-    });
-    _additionalDiscountAmountController.addListener(() {
-      if (_additionalDiscountAmountFocus.hasFocus) {
-        _updateAdditionalDiscount(fromPercent: false);
-      }
-    });
-    // --- END: ADD LISTENERS FOR DISCOUNT FIELDS ---
-
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // Immediately load initial data to show the read-only view without network delay
       setState(() {
@@ -113,14 +114,6 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
       tax['descriptionController']?.dispose();
       tax['accountHeadController']?.dispose();
     }
-
-    // --- START: DISPOSE NEW CONTROLLERS AND FOCUS NODES ---
-    _additionalDiscountPercentageController.dispose();
-    _additionalDiscountAmountController.dispose();
-    _additionalDiscountPercentFocus.dispose();
-    _additionalDiscountAmountFocus.dispose();
-    // --- END: DISPOSE NEW CONTROLLERS AND FOCUS NODES ---
-
     _accountSearchController.dispose();
     _removeOverlay();
     super.dispose();
@@ -232,22 +225,19 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
   void _loadInitialDataForEditing() {
     if (_initialData == null) return;
 
+    // FIX: Wrapped the main loading logic in try-catch blocks.
+    // NOTE: This prevents the app from crashing or getting stuck if the initial data
+    // from the server has an unexpected format. It will show an error and revert
+    // to the read-only view.
     try {
       final data = _initialData!;
       _quotationToController.text = data['quotation_to']?.toString() ?? 'Customer';
       _transactionDate = DateTime.tryParse(data['transaction_date']?.toString() ?? '') ?? DateTime.now();
       _selectedTaxCategory = data['tax_category'] ?? 'Inter State';
 
-      // --- START: LOAD ADDITIONAL DISCOUNT DATA ---
-      _applyDiscountOn = data['apply_discount_on']?.toString() ?? 'Grand Total';
-      final additionalDiscountPercent = (data['additional_discount_percentage'] as num?)?.toDouble() ?? 0.0;
-      final additionalDiscountAmount = (data['discount_amount'] as num?)?.toDouble() ?? 0.0;
-      _additionalDiscountPercentageController.text = additionalDiscountPercent.toStringAsFixed(2);
-      _additionalDiscountAmountController.text = additionalDiscountAmount.toStringAsFixed(2);
-      // --- END: LOAD ADDITIONAL DISCOUNT DATA ---
-
       final itemsFromData = (data['items'] as List<dynamic>?) ?? [];
 
+      // Ensure all UOMs from items are in the list to prevent dropdown errors
       for (var item in itemsFromData) {
         final uom = item['uom']?.toString();
         if (uom != null && !_uomList.contains(uom)) {
@@ -305,10 +295,12 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
       _selectedSalesperson = data['sales_person'] != null
           ? _salespersonsList.firstWhere(
               (sp) => sp['salesperson_name'] == data['sales_person'],
+              // FIX: Corrected the orElse to return a Map<String, String> to avoid a type error.
               orElse: () => {'salesperson_name': data['sales_person']?.toString() ?? ''},
             )
           : null;
 
+      // Correct Tax Reconstruction Logic
       final Map<String, List<String>> itemGeneratedTaxSources = {};
       for (final item in _selectedItems) {
         final itemCode = item['item_code'] as String;
@@ -368,6 +360,7 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
       debugPrint("Stacktrace: $s");
       if (mounted) {
         showErrorDialog(context, 'Load Error', 'Failed to parse quotation data for editing. The data might be corrupt.');
+        // Revert to read-only mode to prevent a broken edit state
         setState(() => _isEditing = false);
       }
     }
@@ -482,26 +475,16 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
               'cost_center': 'Main - NG',
             })
         .toList();
-
-    final taxesToSave = _calculatedTaxes.map((tax) {
-      if (tax['charge_type'] == 'Actual') {
-        return {
-          'account_head': tax['account_head'],
-          'charge_type': tax['charge_type'],
-          'description': tax['description'],
-          'tax_amount': tax['tax_amount'],
-          'rate': 0,
-        };
-      } else {
-        return {
-          'account_head': tax['account_head'],
-          'charge_type': tax['charge_type'],
-          'description': tax['description'],
-          'rate': tax['rate'],
-        };
-      }
-    }).toList();
-
+    final taxesToSave = _calculatedTaxes
+        .map((tax) {
+          return {
+            'account_head': tax['account_head'],
+            'charge_type': tax['charge_type'],
+            'description': tax['description'],
+            'rate': tax['rate'],
+          };
+        })
+        .toList();
     final Map<String, dynamic> quotationData = {
       'quotation_to': _quotationToController.text.isEmpty ? 'Customer' : _quotationToController.text,
       'customer': _selectedCustomer['name']?.toString() ?? '',
@@ -517,15 +500,12 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
       'selling_price_list': _sellingPriceList,
       'currency': _currency,
       if (_initialData != null && _initialData!['name'] != null) 'name': _initialData!['name'],
-      // --- START: ADD NEW DISCOUNT FIELDS TO PAYLOAD ---
-      'apply_discount_on': _applyDiscountOn,
-      'additional_discount_percentage': double.tryParse(_additionalDiscountPercentageController.text) ?? 0.0,
-      'discount_amount': _cachedAdditionalDiscount,
-      // --- END: ADD NEW DISCOUNT FIELDS TO PAYLOAD ---
     };
     try {
       final http.Response response;
+      // Use PUT for updating existing quotation
       if (_initialData == null || _initialData!['name'] == null) {
+        // This case should ideally not happen in an edit screen, but as a fallback:
         response = await retry(
           () => http.post(
             Uri.parse("${widget.serverUrl}/api/resource/Quotation"),
@@ -553,6 +533,7 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
           ),
         );
 
+        // Exit edit mode and refresh data
         setState(() {
           _isEditing = false;
           _initialData = newQuotationData;
@@ -569,7 +550,6 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
   }
 
   // --- CALCULATION & HELPER LOGIC ---
-
   Map<String, dynamic> _createNewTaxRow({
     required String chargeType,
     required String? accountHead,
@@ -578,49 +558,23 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
     List<String>? sourceItemCodes,
     required bool isManual,
   }) {
+    final resolvedRate = chargeType != 'Actual' ? rate : 0.0;
+    final resolvedAmount = chargeType == 'Actual' ? rate : 0.0;
     return {
       'charge_type': chargeType,
       'account_head': accountHead,
       'description': description,
-      'rate': rate,
-      'source_item_codes': sourceItemCodes ?? [],
-      'is_manual': isManual,
-      'rateController': TextEditingController(text: rate.toStringAsFixed(2)),
-      'amountController': TextEditingController(text: '0.00'),
+      'rate': resolvedRate,
+      'amount': resolvedAmount,
+      'rateController': TextEditingController(text: resolvedRate.toStringAsFixed(2)),
+      'amountController': TextEditingController(text: resolvedAmount.toStringAsFixed(2)),
       'descriptionController': TextEditingController(text: description),
-      'accountHeadController': TextEditingController(text: description), // Display name in the text field
+      'accountHeadController': TextEditingController(text: description),
       'targetKey': GlobalKey(),
       'layerLink': LayerLink(),
+      'source_item_codes': sourceItemCodes ?? [],
+      'is_manual': isManual,
     };
-  }
-
-  void _updateAdditionalDiscount({required bool fromPercent}) {
-    // This logic depends on _performCalculations which updates _cachedTotalAmount and _calculatedTaxes
-    double subtotal = _cachedTotalAmount;
-    double taxTotal = _calculatedTaxes.fold(0.0, (sum, tax) => sum + (tax['tax_amount'] as double));
-    double baseForDiscount = _applyDiscountOn == 'Net Total' ? subtotal : subtotal + taxTotal;
-
-    if (fromPercent) {
-      final percent = double.tryParse(_additionalDiscountPercentageController.text) ?? 0.0;
-      final newAmount = (baseForDiscount * percent / 100);
-      final newText = newAmount.toStringAsFixed(2);
-      _additionalDiscountAmountController.value = TextEditingValue(
-        text: newText,
-        selection: TextSelection.collapsed(offset: newText.length),
-      );
-    } else {
-      final amount = double.tryParse(_additionalDiscountAmountController.text) ?? 0.0;
-      final newPercent = baseForDiscount > 0 ? (amount / baseForDiscount * 100) : 0.0;
-      final newText = newPercent.toStringAsFixed(2);
-      _additionalDiscountPercentageController.value = TextEditingValue(
-        text: newText,
-        selection: TextSelection.collapsed(offset: newText.length),
-      );
-    }
-
-    setState(() {
-      _performCalculations();
-    });
   }
 
   double _calculateItemAmount(Map<String, dynamic> item) {
@@ -631,65 +585,44 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
     return (price * qty - discount).clamp(0.0, double.infinity);
   }
 
-  // MODIFIED: Calculation logic is updated to handle discounts correctly.
   void _performCalculations() {
-    _cachedTotalQuantity = _selectedItems.fold(0, (sum, item) => sum + (item['quantity'] as int));
-    // This is the pure item total, which we will now label as "Total"
-    _cachedTotalAmount = _selectedItems.fold(0.0, (sum, item) => sum + (item['amount'] as double));
-
-    final double additionalDiscountAmountInput = double.tryParse(_additionalDiscountAmountController.text) ?? 0.0;
-    
-    double taxBaseAmount;
-    double finalDiscountAmount = additionalDiscountAmountInput;
-
-    // Determine the base for tax calculation
-    if (_applyDiscountOn == 'Net Total') {
-      taxBaseAmount = _cachedTotalAmount - additionalDiscountAmountInput;
-    } else { // 'Grand Total'
-      taxBaseAmount = _cachedTotalAmount;
-    }
-    
-    if (taxBaseAmount < 0) taxBaseAmount = 0;
-    _cachedNetTotal = taxBaseAmount;
-
+    _cachedTotalQuantity = _selectedItems.fold(0, (sum, item) => sum + ((item['quantity'] as num?)?.toInt() ?? (item['qty'] as num?)?.toInt() ?? 0));
+    _cachedTotalAmount = _selectedItems.fold(0.0, (sum, item) => sum + ((item['amount'] as num?)?.toDouble() ?? 0.0));
     List<Map<String, dynamic>> tempCalculatedTaxes = [];
     double grandTotalTax = 0.0;
-
     for (var tax in _customTaxes) {
       final String chargeType = tax['charge_type'] ?? 'On Net Total';
+      double taxableAmount = 0.0;
       double taxAmountForComponent = 0.0;
       double valueToSaveForBackend;
-      
-      // The taxable amount is now the calculated taxBaseAmount for most tax types
-      double taxableAmount = taxBaseAmount; 
-      
-      if (chargeType == 'Actual') {
-        taxAmountForComponent = double.tryParse(tax['amountController'].text) ?? 0.0;
-        valueToSaveForBackend = taxAmountForComponent;
-        if (tax['rateController'].text != '0.00') tax['rateController'].text = '0.00';
-        tax['rate'] = 0.0;
+      List<String> sourceItems = List<String>.from(tax['source_item_codes'] ?? []);
+      bool isManualTax = tax['is_manual'] ?? sourceItems.isEmpty;
+      if (!isManualTax) {
+        for (var item in _selectedItems) {
+          if (sourceItems.contains(item['item_code'])) {
+            taxableAmount += (item['amount'] as double);
+          }
+        }
       } else {
-        double inputRate = double.tryParse(tax['rateController'].text) ?? tax['rate'] ?? 0.0;
-        if (chargeType == 'On Item Quantity') {
-          // This should still be based on quantity, not a monetary value
-          taxAmountForComponent = inputRate * _cachedTotalQuantity;
-          valueToSaveForBackend = inputRate;
-        } else {
-          // All other types are based on the monetary value
-          taxAmountForComponent = (taxableAmount * inputRate / 100);
-          valueToSaveForBackend = inputRate;
-        }
-        final newText = taxAmountForComponent.toStringAsFixed(2);
-        if (tax['amountController'].text != newText) {
-          tax['amountController'].value = TextEditingValue(
-            text: newText,
-            selection: TextSelection.collapsed(offset: newText.length),
-          );
-        }
+        taxableAmount = _cachedTotalAmount;
       }
-
+      double inputRate = double.tryParse(tax['rateController'].text) ?? tax['rate'] ?? 0.0;
+      if (chargeType == 'Actual') {
+        taxAmountForComponent = inputRate;
+        valueToSaveForBackend = taxAmountForComponent;
+      } else if (chargeType == 'On Item Quantity') {
+        taxAmountForComponent = inputRate * _cachedTotalQuantity;
+        valueToSaveForBackend = inputRate;
+      } else {
+        taxAmountForComponent = (taxableAmount * inputRate / 100);
+        valueToSaveForBackend = inputRate;
+      }
+      final newText = taxAmountForComponent.toStringAsFixed(2);
+      tax['amountController'].value = TextEditingValue(
+        text: newText,
+        selection: TextSelection.collapsed(offset: newText.length),
+      );
       grandTotalTax += taxAmountForComponent;
-
       tempCalculatedTaxes.add({
         'description': tax['description'],
         'charge_type': chargeType,
@@ -698,24 +631,12 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
         'rate': valueToSaveForBackend,
       });
     }
-
     _calculatedTaxes = tempCalculatedTaxes;
-    _cachedAdditionalDiscount = finalDiscountAmount;
-
-    // Calculate Grand Total
-    if (_applyDiscountOn == 'Net Total') {
-      // Discount was already subtracted to get taxBaseAmount
-      _cachedGrandTotal = taxBaseAmount + grandTotalTax;
-    } else { // 'Grand Total'
-      // Subtract discount now from the grand total
-      _cachedGrandTotal = _cachedTotalAmount + grandTotalTax - finalDiscountAmount;
-    }
-
-    if(mounted) {
+    _cachedGrandTotal = _cachedTotalAmount + grandTotalTax;
+    if (mounted) {
       setState(() {});
     }
-}
-
+  }
 
   String _parseBarcodeFromItem(dynamic item) {
     String barcodeValue = item['barcode']?.toString() ?? '';
@@ -795,24 +716,21 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
   }
 
   List<Widget> _buildViewModeActions() {
-    final bool canEdit = _initialData != null && _initialData!['status'] == 'Draft';
-
     return [
-      if (canEdit)
-        IconButton(
-          icon: _isEditDataReady
-              ? const Icon(Icons.edit, color: Colors.white)
-              : const SizedBox(
-                  width: 24,
-                  height: 24,
-                  child: Padding(
-                    padding: EdgeInsets.all(4.0),
-                    child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
-                  ),
+      IconButton(
+        icon: _isEditDataReady
+            ? const Icon(Icons.edit, color: Colors.white)
+            : const SizedBox(
+                width: 24,
+                height: 24,
+                child: Padding(
+                  padding: EdgeInsets.all(4.0),
+                  child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
                 ),
-          tooltip: _isEditDataReady ? 'Edit Quotation' : 'Loading data...',
-          onPressed: _isEditDataReady ? _switchToEditMode : null,
-        ),
+              ),
+        tooltip: _isEditDataReady ? 'Edit Quotation' : 'Loading data...',
+        onPressed: _isEditDataReady ? _switchToEditMode : null,
+      ),
       IconButton(
         icon: const Icon(Icons.print, color: Colors.white),
         tooltip: 'Print Preview',
@@ -829,6 +747,7 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
         onPressed: () {
           setState(() {
             _isEditing = false;
+            // No need to reload data, just switch the view
           });
         },
       ),
@@ -878,10 +797,6 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
                   _buildReadOnlyDetailRow('Currency', quotation['currency'] ?? 'N/A'),
                   _buildReadOnlyDetailRow('Company', quotation['company'] ?? 'N/A'),
                   _buildReadOnlyDetailRow('GST Category', quotation['gst_category']?.toString() ?? 'N/A'),
-                  // --- START: MODIFICATION TO SHOW DISCOUNT METHOD ---
-                  if (quotation['discount_amount'] != null && (quotation['discount_amount'] as num? ?? 0) > 0)
-                    _buildReadOnlyDetailRow('Discount On', quotation['apply_discount_on'] ?? 'N/A'),
-                  // --- END: MODIFICATION TO SHOW DISCOUNT METHOD ---
                 ],
               ),
             ),
@@ -911,59 +826,15 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
                           margin: const EdgeInsets.only(bottom: 8),
                           child: Padding(
                             padding: const EdgeInsets.all(12.0),
-                            child: Row(
+                            child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                if (item['image'] != null && item['image'].toString().isNotEmpty)
-                                  ClipRRect(
-                                    borderRadius: BorderRadius.circular(8.0),
-                                    child: CachedNetworkImage(
-                                      imageUrl: item['image'].toString().startsWith('http')
-                                          ? item['image']
-                                          : '${widget.serverUrl}${item['image']}',
-                                      width: 60,
-                                      height: 60,
-                                      fit: BoxFit.cover,
-                                      placeholder: (context, url) => Container(
-                                        width: 60,
-                                        height: 60,
-                                        color: Colors.grey[200],
-                                        child: const Icon(Icons.image, color: Colors.grey),
-                                      ),
-                                      errorWidget: (context, url, error) => Container(
-                                        width: 60,
-                                        height: 60,
-                                        color: Colors.grey[200],
-                                        child: const Icon(Icons.broken_image, color: Colors.grey),
-                                      ),
-                                    ),
-                                  )
-                                else
-                                  Container(
-                                    width: 60,
-                                    height: 60,
-                                    decoration: BoxDecoration(
-                                      color: Colors.grey[200],
-                                      borderRadius: BorderRadius.circular(8.0),
-                                    ),
-                                    child: const Icon(Icons.image_not_supported, color: Colors.grey),
-                                  ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(item['item_name'] ?? 'Unnamed Item',
-                                          style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF003366))),
-                                      const SizedBox(height: 4),
-                                      _buildReadOnlyItemDetailRow('Quantity', '${item['qty'] ?? 'N/A'} ${item['uom'] ?? ''}'),
-                                      _buildReadOnlyItemDetailRow(
-                                          'Rate', (item['price_list_rate'] as num?)?.toStringAsFixed(2) ?? 'N/A'),
-                                      _buildReadOnlyItemDetailRow(
-                                          'Amount', (item['amount'] as num?)?.toStringAsFixed(2) ?? 'N/A'),
-                                    ],
-                                  ),
-                                ),
+                                Text(item['item_name'] ?? 'Unnamed Item',
+                                    style: const TextStyle(fontWeight: FontWeight.bold, color: Color(0xFF003366))),
+                                const SizedBox(height: 4),
+                                _buildReadOnlyItemDetailRow('Quantity', '${item['qty'] ?? 'N/A'} ${item['uom'] ?? ''}'),
+                                _buildReadOnlyItemDetailRow('Rate', (item['price_list_rate'] as num?)?.toStringAsFixed(2) ?? 'N/A'),
+                                _buildReadOnlyItemDetailRow('Amount', (item['amount'] as num?)?.toStringAsFixed(2) ?? 'N/A'),
                               ],
                             ),
                           ),
@@ -987,13 +858,12 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('Taxes and Charges',
-                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF003366))),
+                    const Text('Taxes and Charges', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Color(0xFF003366))),
                     const SizedBox(height: 10),
                     if (taxes.isNotEmpty)
                       ...taxes
-                          .map((tax) => _buildReadOnlyItemDetailRow(
-                              tax['description'] ?? 'Tax', (tax['tax_amount'] as num?)?.toStringAsFixed(2) ?? '0.00'))
+                          .map((tax) =>
+                              _buildReadOnlyItemDetailRow(tax['description'] ?? 'Tax', (tax['tax_amount'] as num?)?.toStringAsFixed(2) ?? '0.00'))
                           .toList()
                     else
                       const Text('No specific tax breakdown available.', style: TextStyle(color: Color(0xFF003366))),
@@ -1004,7 +874,7 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
               ),
             ),
           const SizedBox(height: 20),
-          _buildTotalsCard(),
+          _buildTotalsCard(), // Re-use the totals card for consistency
         ],
       ),
     );
@@ -1068,58 +938,10 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
             ),
           ),
           const SizedBox(height: 8),
-          _buildAdditionalDiscountSection(),
-          const SizedBox(height: 8),
           _buildTotalsCard(),
           const SizedBox(height: 16),
         ],
       ),
-    );
-  }
-
-  Widget _buildAdditionalDiscountSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _buildSectionHeader(context, 'Additional Discount'),
-        DropdownButtonFormField<String>(
-          value: _applyDiscountOn,
-          decoration: _inputDecoration('Apply Additional Discount On'),
-          items: ['Grand Total', 'Net Total'].map((String value) {
-            return DropdownMenuItem<String>(value: value, child: Text(value));
-          }).toList(),
-          onChanged: (newValue) {
-            if (newValue != null) {
-              setState(() {
-                _applyDiscountOn = newValue;
-                _performCalculations();
-              });
-            }
-          },
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(
-              child: TextFormField(
-                controller: _additionalDiscountPercentageController,
-                focusNode: _additionalDiscountPercentFocus,
-                decoration: _inputDecoration('Discount Percentage'),
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: TextFormField(
-                controller: _additionalDiscountAmountController,
-                focusNode: _additionalDiscountAmountFocus,
-                decoration: _inputDecoration('Discount Amount (INR)'),
-                keyboardType: const TextInputType.numberWithOptions(decimal: true),
-              ),
-            ),
-          ],
-        ),
-      ],
     );
   }
 
@@ -1558,8 +1380,6 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
 
   TableRow _buildTaxTableRow(int index, Map<String, dynamic> tax) {
     bool isManual = tax['is_manual'] ?? (tax['source_item_codes'] as List? ?? []).isEmpty;
-    final String chargeType = tax['charge_type'] ?? 'On Net Total';
-
     return TableRow(
       children: [
         Padding(
@@ -1616,28 +1436,24 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
           padding: const EdgeInsets.all(4.0),
           child: TextFormField(
             controller: tax['rateController'],
-            readOnly: !_isEditing || chargeType == 'Actual' || !isManual,
+            readOnly: !isManual || !_isEditing,
             decoration: _inputDecoration(null).copyWith(
-              filled: !_isEditing || chargeType == 'Actual' || !isManual,
-              fillColor: (!_isEditing || chargeType == 'Actual' || !isManual) ? Colors.grey.shade100 : Colors.white,
+              filled: !isManual || !_isEditing,
+              fillColor: (!isManual || !_isEditing) ? Colors.grey.shade100 : Colors.white,
             ),
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             textAlign: TextAlign.center,
-            onChanged: (_isEditing && isManual && chargeType != 'Actual') ? (v) => _updateCustomTaxRow(index, rate: v) : null,
+            onChanged: (isManual && _isEditing) ? (v) => _updateCustomTaxRow(index, rate: v) : null,
           ),
         ),
         Padding(
           padding: const EdgeInsets.all(4.0),
           child: TextFormField(
             controller: tax['amountController'],
-            readOnly: !_isEditing || chargeType != 'Actual',
-            decoration: _inputDecoration(null).copyWith(
-              filled: !_isEditing || chargeType != 'Actual',
-              fillColor: (!_isEditing || chargeType != 'Actual') ? Colors.grey.shade100 : Colors.white,
-            ),
+            readOnly: true,
+            decoration: _inputDecoration(null).copyWith(filled: true, fillColor: Colors.grey.shade100),
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
             textAlign: TextAlign.center,
-            onChanged: (_isEditing && chargeType == 'Actual') ? (v) { setState(() => _performCalculations()); } : null,
           ),
         ),
         Padding(
@@ -1681,46 +1497,23 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
     );
   }
 
-  // MODIFIED: This widget now shows the new breakdown of totals in edit mode.
   Widget _buildTotalsCard() {
+    // In edit mode, use calculated state variables for real-time updates
     if (_isEditing) {
-      bool hasDiscount = _cachedAdditionalDiscount > 0;
-      bool discountOnNetTotal = _applyDiscountOn == 'Net Total';
-
       return Card(
         child: Padding(
           padding: const EdgeInsets.all(12.0),
           child: Column(
             children: [
               _buildTotalRow('Total Quantity:', '$_cachedTotalQuantity'),
-              _buildTotalRow('Total:', '₹${_cachedTotalAmount.toStringAsFixed(2)}'),
-              
-              if (hasDiscount && discountOnNetTotal) ...[
-                _buildTotalRow(
-                  'Additional Discount:',
-                  '- ₹${_cachedAdditionalDiscount.toStringAsFixed(2)}',
-                  isNegative: true,
-                ),
-                const Divider(),
-                _buildTotalRow('Net Total:', '₹${_cachedNetTotal.toStringAsFixed(2)}', isBold: true),
-              ],
-              
+              _buildTotalRow('Subtotal (Items):', '₹${_cachedTotalAmount.toStringAsFixed(2)}'),
               if (_calculatedTaxes.isNotEmpty) const Divider(),
-
               ..._calculatedTaxes.map(
                 (tax) => _buildTotalRow(
                   '${tax['description']}:',
                   '₹${(tax['tax_amount'] as double).toStringAsFixed(2)}',
                 ),
               ),
-              
-              if (hasDiscount && !discountOnNetTotal)
-                _buildTotalRow(
-                  'Additional Discount:',
-                  '- ₹${_cachedAdditionalDiscount.toStringAsFixed(2)}',
-                  isNegative: true,
-                ),
-              
               const Divider(),
               _buildTotalRow('Grand Total:', '₹${_cachedGrandTotal.toStringAsFixed(2)}', isBold: true),
             ],
@@ -1729,15 +1522,18 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
       );
     }
 
-    // Read-only view
+    // In read-only mode, use the data passed initially for instant display
     final quotation = _initialData ?? {};
     final items = (quotation['items'] as List<dynamic>?) ?? [];
     final taxes = (quotation['taxes'] as List<dynamic>?) ?? [];
+
+    // FIX: Calculate totals directly from the item and tax lists.
+    // NOTE: This makes the read-only view accurate even if the main document from the server
+    // is missing summary fields like 'total' or 'grand_total'.
     final totalQuantity = items.fold<int>(0, (sum, item) => sum + ((item['qty'] as num?)?.toInt() ?? 0));
     final totalAmount = items.fold<double>(0.0, (sum, item) => sum + ((item['amount'] as num?)?.toDouble() ?? 0.0));
     final totalTaxes = taxes.fold<double>(0.0, (sum, tax) => sum + ((tax['tax_amount'] as num?)?.toDouble() ?? 0.0));
-    final additionalDiscount = (quotation['discount_amount'] as num?)?.toDouble() ?? 0.0;
-    final grandTotalFromApi = (quotation['grand_total'] as num?)?.toDouble() ?? (totalAmount + totalTaxes - additionalDiscount);
+    final grandTotal = totalAmount + totalTaxes;
 
     return Card(
       child: Padding(
@@ -1745,7 +1541,7 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
         child: Column(
           children: [
             _buildTotalRow('Total Quantity:', '$totalQuantity'),
-            _buildTotalRow('Total:', '₹${totalAmount.toStringAsFixed(2)}'),
+            _buildTotalRow('Subtotal (Items):', '₹${totalAmount.toStringAsFixed(2)}'),
             if (taxes.isNotEmpty) const Divider(),
             ...taxes.map(
               (tax) => _buildTotalRow(
@@ -1753,26 +1549,18 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
                 '₹${(tax['tax_amount'] as num?)?.toStringAsFixed(2) ?? '0.00'}',
               ),
             ),
-             if (additionalDiscount > 0)
-                _buildTotalRow(
-                  'Additional Discount:',
-                  '- ₹${additionalDiscount.toStringAsFixed(2)}',
-                  isNegative: true,
-                ),
             const Divider(),
-            _buildTotalRow('Grand Total:', '₹${grandTotalFromApi.toStringAsFixed(2)}', isBold: true),
+            _buildTotalRow('Grand Total:', '₹${grandTotal.toStringAsFixed(2)}', isBold: true),
           ],
         ),
       ),
     );
   }
 
-
-  Widget _buildTotalRow(String label, String value, {bool isBold = false, bool isNegative = false}) {
+  Widget _buildTotalRow(String label, String value, {bool isBold = false}) {
     final style = TextStyle(
       fontWeight: isBold ? FontWeight.bold : FontWeight.normal,
       fontSize: isBold ? 16 : 14,
-      color: isNegative ? Colors.red.shade700 : null,
     );
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4.0),
@@ -1786,7 +1574,7 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
   void _addCustomTaxRow() {
     setState(() {
       final newTax = _createNewTaxRow(
-        chargeType: 'Actual',
+        chargeType: 'On Net Total',
         accountHead: null,
         description: '',
         rate: 0.0,
@@ -2142,8 +1930,7 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
     }
   }
 
-  // --- PDF GENERATION (NEW CODE) ---
-
+  // --- PDF Generation ---
   void _showPrintPreview(BuildContext context, Map<String, dynamic> quotation) {
     showDialog(
       context: context,
@@ -2153,7 +1940,7 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
           width: MediaQuery.of(context).size.width * 0.9,
           height: MediaQuery.of(context).size.height * 0.8,
           child: PdfPreview(
-            build: (format) => _generatePdf(quotation, widget.serverUrl), // Pass serverUrl
+            build: (format) => _generatePdf(quotation),
             canChangePageFormat: false,
             canDebug: false,
             initialPageFormat: PdfPageFormat.a4,
@@ -2165,114 +1952,51 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
     );
   }
 
-  Future<Uint8List> _generatePdf(Map quotation, String serverUrl) async {
+  Future<Uint8List> _generatePdf(Map<String, dynamic> quotation) async {
     final pdf = pw.Document();
     pw.Font? font;
     try {
       font = await PdfGoogleFonts.notoSansRegular();
     } catch (e) {
       debugPrint('Error loading font: $e');
-      font = pw.Font.helvetica(); // Fallback to Helvetica
+      font = pw.Font.helvetica();
     }
-
     final Uint8List logoData = (await rootBundle.load('assets/images/logo.jpg')).buffer.asUint8List();
     final pw.MemoryImage logoImage = pw.MemoryImage(logoData);
 
-    final List<dynamic> items = quotation['items'] ?? [];
-    final List<dynamic> taxesList = quotation['taxes'] ?? [];
+    // FIX: Calculate all PDF totals directly from the quotation data's lists.
+    // NOTE: This prevents incorrect totals if the print button is pressed from read-only mode,
+    // as the previous logic incorrectly used state variables (_cachedGrandTotal) which are only valid in edit mode.
+    final items = (quotation['items'] as List<dynamic>?) ?? [];
+    final taxes = (quotation['taxes'] as List<dynamic>?) ?? [];
+    double total = items.fold(0.0, (sum, item) => sum + ((item['amount'] as num?)?.toDouble() ?? 0.0));
+    double totalTaxesAndCharges = (quotation['total_taxes_and_charges'] as num?)?.toDouble() ?? taxes.fold(0.0, (sum, tax) => sum + ((tax['tax_amount'] as num?)?.toDouble() ?? 0.0));
+    double grandTotal = (quotation['grand_total'] as num?)?.toDouble() ?? (total + totalTaxesAndCharges);
 
-    double subtotal = items.fold<double>(
-      0.0,
-      (sum, item) => sum + ((item['amount'] ?? 0).toDouble()),
-    );
-
-    double totalTaxesAndCharges = (quotation['total_taxes_and_charges'] != null)
-        ? quotation['total_taxes_and_charges'].toDouble()
-        : taxesList.fold<double>(
-            0.0,
-            (sum, tax) => sum + ((tax['tax_amount'] ?? 0).toDouble()),
-          );
-
-    int totalQty = items.fold<int>(
-      0,
-      (sum, item) => sum + ((item['qty'] ?? 0) as num).toInt(),
-    );
-    
-    final double additionalDiscount = (quotation['discount_amount'] as num?)?.toDouble() ?? 0.0;
-    final grandTotalFromApi = (quotation['grand_total'] as num?)?.toDouble() ?? (subtotal + totalTaxesAndCharges - additionalDiscount);
-
-    int roundedTotal = grandTotalFromApi.round();
+    int roundedTotal = grandTotal.round();
     String inWords = 'INR ${_numberToWordsIndian(roundedTotal)} only';
-
-    List<String> customerNameLines = _splitTextIntoLines(quotation['customer_name'] ?? 'N/A', 25);
-    List<String> mobileNoLines = _splitTextIntoLines(quotation['contact_mobile'] ?? 'N/A', 25);
-    List<String> dateLines = _splitTextIntoLines(quotation['transaction_date'] ?? DateFormat('dd-MM-yyyy').format(DateTime.now()), 25);
-    List<String> validTillLines =
-        _splitTextIntoLines(quotation['valid_till'] ?? DateFormat('dd-MM-yyyy').format(DateTime.now().add(const Duration(days: 30))), 25);
-    List<String> userNameLines = _splitTextIntoLines(quotation['user_name'] ?? 'N/A', 25);
-    List<String> salesPersonLines = _splitTextIntoLines(quotation['sales_person'] ?? 'N/A', 25);
-    List<String> remarksLines = _splitTextIntoLines(quotation['remarks'] ?? 'N/A', 25);
-    List<String> quoteNoLines = _splitTextIntoLines(quotation['name'] ?? 'N/A', 25);
-    List<String> gstCategoryLines = _splitTextIntoLines(quotation['gst_category']?.toString() ?? 'N/A', 25);
-    List<String> inWordsLines = _splitTextIntoLines(inWords, 50);
-
-    bool showSalesPerson = quotation['sales_person'] != null && quotation['sales_person'].toString().isNotEmpty && quotation['sales_person'] != 'N/A';
-    bool showRemarks = quotation['remarks'] != null && quotation['remarks'].toString().isNotEmpty && quotation['remarks'] != 'N/A';
-
-    List<pw.MemoryImage?> itemImages = [];
-    if (quotation['items'] != null && (quotation['items'] as List).isNotEmpty) {
-      for (var item in quotation['items']) {
-        if (item['image'] != null && item['image'].isNotEmpty) {
-          try {
-            String imageUrlString = item['image'].startsWith('http') ? item['image'] : '$serverUrl${item['image']}';
-
-            final response = await http.get(
-              Uri.parse(Uri.encodeFull(imageUrlString)),
-            );
-            if (response.statusCode == 200) {
-              itemImages.add(pw.MemoryImage(response.bodyBytes));
-            } else {
-              itemImages.add(null);
-              debugPrint('Failed to load image for PDF: ${item['item_name']} - Status: ${response.statusCode}');
-            }
-          } catch (e) {
-            debugPrint('Error loading image for ${item['item_name']} for PDF: $e');
-            itemImages.add(null);
-          }
-        } else {
-          itemImages.add(null);
-        }
-      }
-    }
 
     pdf.addPage(
       pw.MultiPage(
         pageFormat: PdfPageFormat.a4,
-        margin: const pw.EdgeInsets.all(56.7), // 2cm margins
+        margin: const pw.EdgeInsets.all(32),
         header: (context) => pw.Column(
-          crossAxisAlignment: pw.CrossAxisAlignment.start,
           children: [
             pw.Row(
               mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
               children: [
-                pw.Image(logoImage, width: 60, height: 60),
+                pw.Image(logoImage, width: 70, height: 70),
                 pw.Column(
                   crossAxisAlignment: pw.CrossAxisAlignment.center,
                   children: [
-                    pw.Text(
-                      'QUOTATION',
-                      style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold, font: font),
-                    ),
-                    pw.Text(
-                      'HOME MART',
-                      style: pw.TextStyle(fontSize: 16, fontWeight: pw.FontWeight.bold, font: font),
-                    ),
+                    pw.Text('QUOTATION', style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold, font: font)),
+                    pw.Text('HOME MART', style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold, font: font)),
                   ],
                 ),
-                pw.SizedBox(width: 60),
+                pw.SizedBox(width: 70),
               ],
             ),
-            pw.SizedBox(height: 12),
+            pw.SizedBox(height: 10),
             pw.Divider(thickness: 1, color: PdfColors.black),
           ],
         ),
@@ -2285,345 +2009,47 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
           ),
         ),
         build: (pw.Context context) => [
-          pw.Row(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: [
-              pw.Expanded(
-                flex: 1,
-                child: pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.start,
-                  children: [
-                    _buildPdfDetailRow('Customer Name:', customerNameLines, font),
-                    pw.SizedBox(height: 8),
-                    _buildPdfDetailRow('Mobile No:', mobileNoLines, font),
-                    pw.SizedBox(height: 8),
-                    _buildPdfDetailRow('GST Category:', gstCategoryLines, font),
-                  ],
-                ),
-              ),
-              pw.SizedBox(width: 20),
-              pw.Expanded(
-                flex: 1,
-                child: pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.start,
-                  children: [
-                    _buildPdfDetailRow('Quote No.:', quoteNoLines, font),
-                    pw.SizedBox(height: 8),
-                    _buildPdfDetailRow('Date:', dateLines, font),
-                    pw.SizedBox(height: 8),
-                    _buildPdfDetailRow('Valid Till:', validTillLines, font),
-                    pw.SizedBox(height: 8),
-                    _buildPdfDetailRow('User Name:', userNameLines, font),
-                    if (showSalesPerson) ...[
-                      pw.SizedBox(height: 8),
-                      _buildPdfDetailRow('Sales Person:', salesPersonLines, font),
-                    ],
-                    if (showRemarks) ...[
-                      pw.SizedBox(height: 8),
-                      _buildPdfDetailRow('Remarks:', remarksLines, font),
-                    ],
-                  ],
-                ),
-              ),
-            ],
+          pw.Text('Customer: ${quotation['customer_name'] ?? 'N/A'}', style: pw.TextStyle(font: font)),
+          pw.Text('Date: ${quotation['transaction_date'] ?? 'N/A'}', style: pw.TextStyle(font: font)),
+          pw.SizedBox(height: 20),
+          pw.Text('Items:', style: pw.TextStyle(font: font, fontWeight: pw.FontWeight.bold)),
+          pw.Table.fromTextArray(
+              headers: ['Item Name', 'Qty', 'Rate', 'Amount'],
+              data: (quotation['items'] as List<dynamic>).map((item) {
+                return [
+                  item['item_name'] ?? '',
+                  '${item['qty'] ?? 0} ${item['uom'] ?? ''}',
+                  (item['price_list_rate'] as num?)?.toStringAsFixed(2) ?? '0.00',
+                  (item['amount'] as num?)?.toStringAsFixed(2) ?? '0.00',
+                ];
+              }).toList()),
+          pw.SizedBox(height: 20),
+          pw.Align(
+            alignment: pw.Alignment.centerRight,
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.end,
+              children: [
+                pw.Text('Subtotal: ${total.toStringAsFixed(2)}', style: pw.TextStyle(font: font)),
+                pw.Text('Taxes & Charges: ${totalTaxesAndCharges.toStringAsFixed(2)}', style: pw.TextStyle(font: font)),
+                pw.Divider(),
+                pw.Text('Grand Total: ${grandTotal.toStringAsFixed(2)}',
+                    style: pw.TextStyle(font: font, fontWeight: pw.FontWeight.bold)),
+              ],
+            ),
           ),
           pw.SizedBox(height: 20),
-          pw.Text(
-            'Items',
-            style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, font: font),
-          ),
-          pw.SizedBox(height: 8),
-          pw.Table(
-            border: pw.TableBorder.all(color: PdfColors.black),
-            columnWidths: {
-              0: const pw.FixedColumnWidth(30),
-              1: const pw.FlexColumnWidth(2),
-              2: const pw.FixedColumnWidth(50),
-              3: const pw.FixedColumnWidth(60),
-              4: const pw.FixedColumnWidth(60),
-              5: const pw.FixedColumnWidth(60),
-              6: const pw.FixedColumnWidth(60),
-            },
-            children: [
-              pw.TableRow(
-                decoration: const pw.BoxDecoration(color: PdfColors.grey200),
-                children: [
-                  pw.Container(
-                      alignment: pw.Alignment.center,
-                      padding: const pw.EdgeInsets.all(5),
-                      child: pw.Text('Sr', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10, font: font))),
-                  pw.Container(
-                      alignment: pw.Alignment.centerLeft,
-                      padding: const pw.EdgeInsets.all(5),
-                      child: pw.Text('Item Name', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10, font: font))),
-                  pw.Container(
-                      alignment: pw.Alignment.center,
-                      padding: const pw.EdgeInsets.all(5),
-                      child: pw.Text('Image', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10, font: font))),
-                  pw.Container(
-                      alignment: pw.Alignment.center,
-                      padding: const pw.EdgeInsets.all(5),
-                      child: pw.Text('Qty/UOM', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10, font: font))),
-                  pw.Container(
-                      alignment: pw.Alignment.center,
-                      padding: const pw.EdgeInsets.all(5),
-                      child: pw.Text('List Rate', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10, font: font))),
-                  pw.Container(
-                      alignment: pw.Alignment.center,
-                      padding: const pw.EdgeInsets.all(5),
-                      child: pw.Text('After Disc', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10, font: font))),
-                  pw.Container(
-                      alignment: pw.Alignment.center,
-                      padding: const pw.EdgeInsets.all(5),
-                      child: pw.Text('Amount', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10, font: font))),
-                ],
-              ),
-              if (items.isNotEmpty)
-                ...List.generate(items.length, (index) {
-                  final item = items[index];
-                  final mrp = item['price_list_rate']?.toDouble() ?? 0.0;
-                  final afterDisc = item['rate']?.toDouble() ?? 0.0;
-                  final amount = item['amount']?.toDouble() ?? 0.0;
-                  final qtyUom = '${item['qty']?.toString() ?? 'N/A'}/${item['uom'] ?? 'N/A'}';
-                  return pw.TableRow(
-                    children: [
-                      pw.Container(
-                          alignment: pw.Alignment.center,
-                          padding: const pw.EdgeInsets.all(5),
-                          child: pw.Text('${index + 1}', style: pw.TextStyle(fontSize: 10, font: font))),
-                      pw.Container(
-                          alignment: pw.Alignment.centerLeft,
-                          padding: const pw.EdgeInsets.all(5),
-                          child: pw.Text(item['item_name'] ?? 'N/A', style: pw.TextStyle(fontSize: 10, font: font))),
-                      pw.Container(
-                        alignment: pw.Alignment.center,
-                        padding: const pw.EdgeInsets.all(5),
-                        child: itemImages[index] != null
-                            ? pw.Image(itemImages[index]!, width: 30, height: 30, fit: pw.BoxFit.cover)
-                            : pw.SizedBox(width: 30, height: 30),
-                      ),
-                      pw.Container(
-                          alignment: pw.Alignment.center,
-                          padding: const pw.EdgeInsets.all(5),
-                          child: pw.Text(qtyUom, style: pw.TextStyle(fontSize: 10, font: font))),
-                      pw.Container(
-                          alignment: pw.Alignment.centerRight,
-                          padding: const pw.EdgeInsets.all(5),
-                          child: pw.Text(mrp.toStringAsFixed(2), style: pw.TextStyle(fontSize: 10, font: font))),
-                      pw.Container(
-                          alignment: pw.Alignment.centerRight,
-                          padding: const pw.EdgeInsets.all(5),
-                          child: pw.Text(afterDisc.toStringAsFixed(2), style: pw.TextStyle(fontSize: 10, font: font))),
-                      pw.Container(
-                          alignment: pw.Alignment.centerRight,
-                          padding: const pw.EdgeInsets.all(5),
-                          child: pw.Text(amount.toStringAsFixed(2), style: pw.TextStyle(fontSize: 10, font: font))),
-                    ],
-                  );
-                })
-              else
-                pw.TableRow(
-                  children: [
-                    pw.Container(),
-                    pw.Container(
-                        alignment: pw.Alignment.center,
-                        padding: const pw.EdgeInsets.all(5),
-                        child: pw.Text('No items available', style: pw.TextStyle(fontSize: 10, font: font))),
-                    pw.Container(),
-                    pw.Container(),
-                    pw.Container(),
-                    pw.Container(),
-                    pw.Container(),
-                  ],
-                ),
-            ],
-          ),
-          pw.SizedBox(height: 20),
-          if (taxesList.isNotEmpty || totalTaxesAndCharges > 0) ...[
-            pw.Text(
-              'Taxes and Charges',
-              style: pw.TextStyle(fontSize: 14, fontWeight: pw.FontWeight.bold, font: font),
-            ),
-            pw.SizedBox(height: 8),
-            if (taxesList.isNotEmpty)
-              pw.Table(
-                border: pw.TableBorder.all(color: PdfColors.black),
-                columnWidths: {
-                  0: const pw.FlexColumnWidth(2),
-                  1: const pw.FixedColumnWidth(80),
-                },
-                children: [
-                  pw.TableRow(
-                    decoration: const pw.BoxDecoration(color: PdfColors.grey200),
-                    children: [
-                      pw.Container(
-                          alignment: pw.Alignment.centerLeft,
-                          padding: const pw.EdgeInsets.all(5),
-                          child: pw.Text('Description', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10, font: font))),
-                      pw.Container(
-                          alignment: pw.Alignment.centerRight,
-                          padding: const pw.EdgeInsets.all(5),
-                          child: pw.Text('Tax Amount', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10, font: font))),
-                    ],
-                  ),
-                  ...taxesList.map((tax) {
-                    return pw.TableRow(
-                      children: [
-                        pw.Container(
-                            alignment: pw.Alignment.centerLeft,
-                            padding: const pw.EdgeInsets.all(5),
-                            child: pw.Text(tax['description'] ?? 'N/A', style: pw.TextStyle(fontSize: 10, font: font))),
-                        pw.Container(
-                            alignment: pw.Alignment.centerRight,
-                            padding: const pw.EdgeInsets.all(5),
-                            child: pw.Text((tax['tax_amount']?.toDouble() ?? 0.0).toStringAsFixed(2),
-                                style: pw.TextStyle(fontSize: 10, font: font))),
-                      ],
-                    );
-                  }).toList(),
-                ],
-              )
-            else
-              pw.Text(
-                'No specific tax breakdown available.',
-                style: pw.TextStyle(fontSize: 10, font: font),
-              ),
-            pw.SizedBox(height: 8),
-            pw.Align(
-              alignment: pw.Alignment.centerRight,
-              child: pw.Text(
-                'Total Taxes and Charges: ₹${totalTaxesAndCharges.toStringAsFixed(2)}',
-                style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, font: font),
-              ),
-            ),
-            pw.SizedBox(height: 20),
-          ],
-          pw.Row(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: [
-              pw.Expanded(
-                flex: 1,
-                child: pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.start,
-                  children: [
-                    pw.Text(
-                      'Total Quantity: $totalQty',
-                      style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, font: font),
-                    ),
-                  ],
-                ),
-              ),
-              // --- START: REFACTORED PDF TOTALS TO MATCH UI ---
-              pw.Expanded(
-                flex: 1,
-                child: pw.Column(
-                  crossAxisAlignment: pw.CrossAxisAlignment.end,
-                  children: [
-                    pw.Row(
-                      mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                      children: [
-                        pw.Text('Subtotal (Items):', style: pw.TextStyle(fontSize: 12, font: font)),
-                        pw.Text('₹${subtotal.toStringAsFixed(2)}', style: pw.TextStyle(fontSize: 12, font: font)),
-                      ],
-                    ),
-                    if (additionalDiscount > 0) ...[
-                      pw.SizedBox(height: 8),
-                      pw.Row(
-                        mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                        children: [
-                          pw.Text('Additional Discount:', style: pw.TextStyle(fontSize: 12, font: font, color: PdfColors.red)),
-                          pw.Text('- ₹${additionalDiscount.toStringAsFixed(2)}', style: pw.TextStyle(fontSize: 12, font: font, color: PdfColors.red)),
-                        ],
-                      ),
-                    ],
-                    pw.SizedBox(height: 8),
-                    pw.Divider(thickness: 0.5),
-                    pw.SizedBox(height: 4),
-                    pw.Row(
-                      mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                      children: [
-                        pw.Text('Grand Total:', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, font: font)),
-                        pw.Text('₹${grandTotalFromApi.toStringAsFixed(2)}', style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, font: font)),
-                      ],
-                    ),
-                    pw.SizedBox(height: 8),
-                    pw.Row(
-                      mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-                      children: [
-                        pw.Text('Rounded Total:', style: pw.TextStyle(fontSize: 12, font: font)),
-                        pw.Text('₹${roundedTotal.toStringAsFixed(2)}', style: pw.TextStyle(fontSize: 12, font: font)),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              // --- END: REFACTORED PDF TOTALS TO MATCH UI ---
-            ],
-          ),
-          pw.SizedBox(height: 16),
-          pw.Text(
-            'Amount in Words:',
-            style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, font: font),
-          ),
-          ...inWordsLines.map((line) => pw.Text(line, style: pw.TextStyle(fontSize: 12, font: font))),
-          pw.SizedBox(height: 40),
-          pw.Row(
-            mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-            children: [
-              pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.start,
-                children: [
-                  pw.Container(width: 150, child: pw.Divider(thickness: 1, color: PdfColors.black)),
-                  pw.Text(
-                    'Customer\'s Signature',
-                    style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, font: font),
-                  ),
-                ],
-              ),
-              pw.Column(
-                crossAxisAlignment: pw.CrossAxisAlignment.end,
-                children: [
-                  pw.Container(width: 150, child: pw.Divider(thickness: 1, color: PdfColors.black)),
-                  pw.Text(
-                    'Authorized Signature',
-                    style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, font: font),
-                  ),
-                ],
-              ),
-            ],
-          ),
+          pw.Text('Amount in Words: $inWords', style: pw.TextStyle(font: font)),
         ],
       ),
     );
-
-    return await pdf.save();
-  }
-
-  pw.Widget _buildPdfDetailRow(String label, List<String> lines, pw.Font? font) {
-    return pw.Row(
-      mainAxisAlignment: pw.MainAxisAlignment.start,
-      crossAxisAlignment: pw.CrossAxisAlignment.start,
-      children: [
-        pw.Text(
-          label,
-          style: pw.TextStyle(fontSize: 12, fontWeight: pw.FontWeight.bold, font: font),
-        ),
-        pw.SizedBox(width: 5),
-        pw.Expanded(
-          child: pw.Column(
-            crossAxisAlignment: pw.CrossAxisAlignment.start,
-            children: lines.map((line) => pw.Text(line, style: pw.TextStyle(fontSize: 12, font: font))).toList(),
-          ),
-        ),
-      ],
-    );
+    return pdf.save();
   }
 
   String _numberToWordsIndian(int number) {
     if (number == 0) return 'Zero';
     const List units = [
       '', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten',
-      'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen',
+      'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'
     ];
     const List tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
     List parts = [];
@@ -2640,14 +2066,17 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
     if (lakh > 0) parts.add('${_convertLessThanThousand(lakh)} Lakh');
     if (thousand > 0) parts.add('${_convertLessThanThousand(thousand)} Thousand');
     if (hundred > 0) parts.add('${units[hundred]} Hundred');
-    if (remaining > 0) parts.add(_convertLessThanThousand(remaining));
+    // FIX: Removed incorrect "and" which is not always standard in Indian numbering.
+    if (remaining > 0) {
+      parts.add(_convertLessThanThousand(remaining));
+    }
     return parts.join(' ').trim();
   }
 
   String _convertLessThanThousand(int number) {
     const List units = [
       '', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine', 'Ten',
-      'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen',
+      'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'
     ];
     const List tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
     if (number == 0) return '';
@@ -2655,26 +2084,6 @@ class _QuotationDetailScreenState extends State<QuotationDetailScreen> {
     int ten = number ~/ 10;
     int unit = number % 10;
     return '${tens[ten]}${unit > 0 ? ' ${units[unit]}' : ''}'.trim();
-  }
-
-  List<String> _splitTextIntoLines(String text, int maxLineLength) {
-    List<String> lines = [];
-    List<String> words = text.split(' ');
-    String currentLine = '';
-    for (String word in words) {
-      if (currentLine.isEmpty) {
-        currentLine = word;
-      } else if ((currentLine.length + word.length + 1) <= maxLineLength) {
-        currentLine += ' $word';
-      } else {
-        lines.add(currentLine);
-        currentLine = word;
-      }
-    }
-    if (currentLine.isNotEmpty) {
-      lines.add(currentLine);
-    }
-    return lines;
   }
 }
 
@@ -2874,3 +2283,4 @@ class ItemSearchDelegate extends SearchDelegate<dynamic> {
     );
   }
 }
+

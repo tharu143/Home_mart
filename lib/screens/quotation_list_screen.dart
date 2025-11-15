@@ -1,9 +1,32 @@
-// lib/screens/quotation_list_screen.dart
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'dart:async';
-import 'package:home_mart/error_handler.dart'; // Import error handler
+// import 'package:home_mart/error_handler.dart'; // Import error handler - Assuming you have this file
+
+// Mock Error Handler since the original was not provided
+void showApiErrorDialog(BuildContext context, {required int statusCode, required String message}) {
+  showDialog(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('API Error: $statusCode'),
+      content: SingleChildScrollView(child: Text(message)),
+      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK'))],
+    ),
+  );
+}
+
+void showErrorDialog(BuildContext context, String title, String message) {
+  showDialog(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(title),
+      content: Text(message),
+      actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK'))],
+    ),
+  );
+}
+// End Mock Error Handler
 
 class QuotationListScreen extends StatefulWidget {
   final String serverUrl;
@@ -30,31 +53,33 @@ class _QuotationListScreenState extends State<QuotationListScreen>
   final TextEditingController _searchController = TextEditingController();
   Timer? _debounce;
   Map<String, dynamic>? _cachedData; // Simple in-memory cache
-  ScrollController _scrollController = ScrollController();
-
+  final ScrollController _scrollController = ScrollController();
   late AnimationController _listAnimationController;
   late Animation<double> _fadeAnimation;
 
   @override
   void initState() {
     super.initState();
-    _loadQuotations();
-    _searchController.addListener(_onSearchChanged);
-    _scrollController.addListener(_onScroll);
-
-    // Initialize animation controller for list items
-    _listAnimationController = AnimationController(
-      duration: const Duration(
-        milliseconds: 500,
-      ), // Shorter duration for quick, smooth fade
-      vsync: this,
-    );
-    _fadeAnimation = CurvedAnimation(
-      parent: _listAnimationController,
-      curve: Curves.easeInOut, // Smooth easing curve for natural animation
-    );
-    _listAnimationController
-        .forward(); // Start the animation when the screen loads
+    // Validate SID before proceeding
+    if (widget.sid.isEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        Navigator.pushReplacementNamed(context, '/');
+      });
+    } else {
+      _loadQuotations();
+      _searchController.addListener(_onSearchChanged);
+      _scrollController.addListener(_onScroll);
+      // Initialize animation controller for list items
+      _listAnimationController = AnimationController(
+        duration: const Duration(milliseconds: 500),
+        vsync: this,
+      );
+      _fadeAnimation = CurvedAnimation(
+        parent: _listAnimationController,
+        curve: Curves.easeInOut,
+      );
+      _listAnimationController.forward();
+    }
   }
 
   @override
@@ -67,56 +92,54 @@ class _QuotationListScreenState extends State<QuotationListScreen>
   }
 
   Map<String, String> _getHeaders() => {
-    'Cookie': 'sid=${widget.sid}',
-    'Content-Type': 'application/json',
-    'Accept': 'application/json',
-  };
+        'Cookie': 'sid=${widget.sid}',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      };
 
   Future<void> _loadQuotations({bool isRefresh = false}) async {
     if (_isLoading || (!_hasMore && !isRefresh)) return;
-
     setState(() => _isLoading = true);
-
     if (isRefresh) {
       _page = 1;
       _quotations.clear();
       _filteredQuotations.clear();
       _hasMore = true;
     }
-
     try {
       final response = await http.get(
         Uri.parse(
-          // UPDATED API ENDPOINT as requested
           '${widget.serverUrl}/api/method/custom_scripts.API.qtn.get_quotation_details1?page=$_page&limit=$_pageSize',
         ),
         headers: _getHeaders(),
       );
-
       debugPrint('Response Status: ${response.statusCode}');
       debugPrint('Response Body: ${response.body}');
-
       if (response.statusCode == 200) {
         final jsonResponse = jsonDecode(response.body);
+        // Handle both 'data' and 'message' keys for robustness
         final List<dynamic> data =
             jsonResponse['data'] ?? jsonResponse['message'] ?? [];
-
+        // Validate data structure
+        if (data.isNotEmpty &&
+            !data.every((item) => item is Map<String, dynamic>)) {
+          throw const FormatException('Invalid quotation data format');
+        }
         setState(() {
           if (isRefresh) {
             _quotations = data;
           } else {
             _quotations.addAll(data);
           }
-          _filterQuotations(); // Re-filter after loading new data
+          _filterQuotations();
           _page++;
-          _hasMore =
-              data.length == _pageSize; // If less than pageSize, no more data
+          _hasMore = data.length == _pageSize;
           _isLoading = false;
         });
-
-        // Cache the response (optional, can be expanded with proper cache management)
+        // Cache the response
         _cachedData = {'data': _quotations, 'timestamp': DateTime.now()};
       } else {
+        if (!mounted) return;
         showApiErrorDialog(
           context,
           statusCode: response.statusCode,
@@ -125,6 +148,7 @@ class _QuotationListScreenState extends State<QuotationListScreen>
         setState(() => _isLoading = false);
       }
     } catch (e) {
+      if (!mounted) return;
       showErrorDialog(context, 'Network Error', 'Error loading quotations: $e');
       setState(() => _isLoading = false);
     }
@@ -134,7 +158,7 @@ class _QuotationListScreenState extends State<QuotationListScreen>
     if (_scrollController.position.pixels ==
             _scrollController.position.maxScrollExtent &&
         !_isLoading) {
-      _loadQuotations(); // Load next page when scrolled to bottom
+      _loadQuotations();
     }
   }
 
@@ -161,8 +185,7 @@ class _QuotationListScreenState extends State<QuotationListScreen>
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-    final isSmallScreen = screenWidth < 400; // For 4" screens (~320-400px)
-
+    final isSmallScreen = screenWidth < 400;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Quotations'),
@@ -182,9 +205,7 @@ class _QuotationListScreenState extends State<QuotationListScreen>
         child: Column(
           children: [
             Padding(
-              padding: EdgeInsets.all(
-                isSmallScreen ? 12.0 : 16.0,
-              ), // Adjusted padding for responsiveness
+              padding: EdgeInsets.all(isSmallScreen ? 12.0 : 16.0),
               child: TextField(
                 controller: _searchController,
                 decoration: InputDecoration(
@@ -214,15 +235,12 @@ class _QuotationListScreenState extends State<QuotationListScreen>
                       )
                     : ListView.separated(
                         controller: _scrollController,
-                        padding: EdgeInsets.all(
-                          isSmallScreen ? 12.0 : 16.0,
-                        ), // Adjusted padding for responsiveness
+                        padding: EdgeInsets.all(isSmallScreen ? 12.0 : 16.0),
                         itemCount:
-                            _filteredQuotations.length +
-                            (_hasMore ? 1 : 0), // Add 1 for loading indicator
+                            _filteredQuotations.length + (_hasMore ? 1 : 0),
                         separatorBuilder: (_, __) => SizedBox(
                           height: isSmallScreen ? 6 : 8,
-                        ), // Runtime value
+                        ),
                         itemBuilder: (context, index) {
                           if (index == _filteredQuotations.length && _hasMore) {
                             return const Center(
@@ -235,10 +253,7 @@ class _QuotationListScreenState extends State<QuotationListScreen>
                             );
                           }
                           final quote = _filteredQuotations[index];
-                          return _buildAnimatedQuotationCard(
-                            quote,
-                            index,
-                          ); // Use animated card
+                          return _buildAnimatedQuotationCard(quote, index);
                         },
                       ),
               ),
@@ -247,18 +262,24 @@ class _QuotationListScreenState extends State<QuotationListScreen>
         ),
       ),
       floatingActionButton: ScaleTransition(
-        scale: _fadeAnimation, // Use the same animation for FAB
+        scale: _fadeAnimation,
         child: FloatingActionButton(
           onPressed: () async {
-            // Navigate to quotation creation screen and pass SID
+            if (widget.sid.isEmpty) {
+              showErrorDialog(context, 'Session Error',
+                  'Invalid session. Please log in again.');
+              Navigator.pushNamedAndRemoveUntil(
+                  context, '/', (route) => false);
+              return;
+            }
             await Navigator.pushNamed(
               context,
               '/quotation',
               arguments: {'sid': widget.sid, 'serverUrl': widget.serverUrl},
             );
-            _loadQuotations(isRefresh: true); // Refresh list after returning
+            _loadQuotations(isRefresh: true);
           },
-          backgroundColor: Theme.of(context).colorScheme.secondary, // Teal
+          backgroundColor: Theme.of(context).colorScheme.secondary,
           child: const Icon(Icons.add, color: Colors.white),
         ),
       ),
@@ -266,81 +287,65 @@ class _QuotationListScreenState extends State<QuotationListScreen>
   }
 
   Widget _buildAnimatedQuotationCard(Map<String, dynamic> quote, int index) {
-    // Animate each card with a staggered fade effect based on index
     return FadeTransition(
       opacity: Tween<double>(begin: 0, end: 1).animate(
         CurvedAnimation(
           parent: _listAnimationController,
           curve: Interval(
-            index * 0.1, // Stagger the animation by 0.1 seconds per item
+            index * 0.1,
             1.0,
             curve: Curves.easeInOut,
           ),
         ),
       ),
       child: SlideTransition(
-        position: Tween<Offset>(begin: const Offset(0, 0.1), end: Offset.zero)
-            .animate(
-              CurvedAnimation(
-                parent: _listAnimationController,
-                curve: Interval(
-                  index * 0.1, // Stagger the animation by 0.1 seconds per item
-                  1.0,
-                  curve: Curves.easeInOut,
-                ),
-              ),
+        position:
+            Tween<Offset>(begin: const Offset(0, 0.1), end: Offset.zero)
+                .animate(
+          CurvedAnimation(
+            parent: _listAnimationController,
+            curve: Interval(
+              index * 0.1,
+              1.0,
+              curve: Curves.easeInOut,
             ),
+          ),
+        ),
         child: _buildQuotationCard(quote),
       ),
     );
   }
 
   Widget _buildQuotationCard(Map<String, dynamic> quote) {
-    // Check if status is one of the specified values for highlighting
     bool isOrdered = quote['status'] == 'Ordered';
     bool isPartiallyOrdered = quote['status'] == 'Partially Ordered';
     bool isOpen = quote['status'] == 'Open';
     bool isCancelled = quote['status'] == 'Cancelled';
-
     return Card(
       elevation: 2,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(12),
-        // Add a border based on status
         side: isOrdered
-            ? const BorderSide(
-                color: Color(0xFF4CAF50),
-                width: 2,
-              ) // Green border for "Ordered"
+            ? const BorderSide(color: Color(0xFF4CAF50), width: 2)
             : isPartiallyOrdered
-            ? const BorderSide(
-                color: Color(0xFFFFA000),
-                width: 2,
-              ) // Amber/orange border for "Partially Ordered"
-            : isOpen
-            ? const BorderSide(
-                color: Color(0xFF2196F3),
-                width: 2,
-              ) // Blue border for "Open"
-            : isCancelled
-            ? const BorderSide(
-                color: Color(0xFFF44336),
-                width: 2,
-              ) // Red border for "Cancelled"
-            : BorderSide.none,
+                ? const BorderSide(color: Color(0xFFFFA000), width: 2)
+                : isOpen
+                    ? const BorderSide(color: Color(0xFF2196F3), width: 2)
+                    : isCancelled
+                        ? const BorderSide(color: Color(0xFFF44336), width: 2)
+                        : BorderSide.none,
       ),
       child: Container(
         padding: const EdgeInsets.all(12),
-        // Highlight background based on status
         color: isOrdered
-            ? const Color(0xFFE8F5E9) // Light green for "Ordered"
+            ? const Color(0xFFE8F5E9)
             : isPartiallyOrdered
-            ? const Color(0xFFFFF3E0) // Light amber for "Partially Ordered"
-            : isOpen
-            ? const Color(0xFFE3F2FD) // Light blue for "Open"
-            : isCancelled
-            ? const Color(0xFFFEF1F0) // Light red for "Cancelled"
-            : Colors.white, // White for other statuses
+                ? const Color(0xFFFFF3E0)
+                : isOpen
+                    ? const Color(0xFFE3F2FD)
+                    : isCancelled
+                        ? const Color(0xFFFEF1F0)
+                        : Colors.white,
         child: ListTile(
           contentPadding: const EdgeInsets.all(12),
           title: Text(
@@ -365,25 +370,22 @@ class _QuotationListScreenState extends State<QuotationListScreen>
                 'To: ${quote['quotation_to'] ?? 'N/A'}',
                 style: const TextStyle(color: Colors.grey),
               ),
-              // Display status in subtitle with color based on status
               Text(
                 'Status: ${quote['status'] ?? 'N/A'}',
                 style: TextStyle(
                   color: isOrdered
-                      ? const Color(0xFF4CAF50) // Green text for "Ordered"
+                      ? const Color(0xFF4CAF50)
                       : isPartiallyOrdered
-                      ? const Color(
-                          0xFFFFA000,
-                        ) // Amber/orange text for "Partially Ordered"
-                      : isOpen
-                      ? const Color(0xFF2196F3) // Blue text for "Open"
-                      : isCancelled
-                      ? const Color(0xFFF44336) // Red text for "Cancelled"
-                      : Colors.grey, // Grey text for other statuses
+                          ? const Color(0xFFFFA000)
+                          : isOpen
+                              ? const Color(0xFF2196F3)
+                              : isCancelled
+                                  ? const Color(0xFFF44336)
+                                  : Colors.grey,
                   fontWeight:
                       isOrdered || isPartiallyOrdered || isOpen || isCancelled
-                      ? FontWeight.bold
-                      : FontWeight.normal,
+                          ? FontWeight.bold
+                          : FontWeight.normal,
                 ),
               ),
             ],
@@ -393,10 +395,20 @@ class _QuotationListScreenState extends State<QuotationListScreen>
             color: Theme.of(context).colorScheme.secondary,
           ),
           onTap: () {
+            if (widget.sid.isEmpty) {
+              showErrorDialog(context, 'Session Error',
+                  'Invalid session. Please log in again.');
+              Navigator.pushNamedAndRemoveUntil(context, '/', (route) => false);
+              return;
+            }
             Navigator.pushNamed(
               context,
               '/quotation_detail',
-              arguments: quote, // Pass the entire quotation map
+              arguments: {
+                'sid': widget.sid,
+                'serverUrl': widget.serverUrl,
+                ...quote, // Spread the quotation map to include all its fields
+              },
             );
           },
         ),

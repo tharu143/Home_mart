@@ -19,12 +19,10 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _handleLogin() async {
     if (!_formKey.currentState!.validate()) return;
-
     setState(() => _isLoading = true);
-
     try {
       final response = await http.post(
-        Uri.parse("${widget.serverUrl}/api/method/login"),
+        Uri.parse("http://128.199.27.173/api/method/custom_scripts.API.login.custom_login"),
         headers: {'Content-Type': 'application/json'},
         body: json.encode({
           'usr': _usernameController.text,
@@ -34,45 +32,28 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (response.statusCode == 200) {
         final jsonResponse = jsonDecode(response.body);
-        if (jsonResponse['message'] == 'Logged In') {
-          // Extract the SID from the response headers
-          String? sid;
-          String? fullName =
-              jsonResponse['full_name'] ??
-              'User'; // Fetch full name from response
-          final setCookieHeader = response.headers['set-cookie'];
-          if (setCookieHeader != null) {
-            // Parse cookies to find the 'sid'
-            final cookies = setCookieHeader.split(';');
-            for (var cookie in cookies) {
-              final parts = cookie.trim().split('=');
-              if (parts.length == 2 && parts[0] == 'sid') {
-                sid = parts[1];
-                break;
-              }
-            }
-          }
+        // Check if the response contains the expected fields
+        if (jsonResponse['sid'] != null && jsonResponse['sid'].isNotEmpty) {
+          // Extract SID and full name from the response
+          String sid = jsonResponse['sid'];
+          String fullName = jsonResponse['full_name'] ?? 'User';
 
-          if (sid != null && sid.isNotEmpty) {
-            // Navigate to Dashboard and pass the SID and full name
-            Navigator.pushReplacementNamed(
-              context,
-              '/dashboard',
-              arguments: {
-                'sid': sid,
-                'fullName': fullName,
-                'serverUrl': widget.serverUrl,
-              },
-            );
-          } else {
-            showErrorDialog(
-              context,
-              'Login Error',
-              'Session ID (SID) not found.',
-            );
-          }
+          // Navigate to Dashboard and pass the SID and full name
+          Navigator.pushReplacementNamed(
+            context,
+            '/dashboard',
+            arguments: {
+              'sid': sid,
+              'fullName': fullName,
+              'serverUrl': widget.serverUrl,
+            },
+          );
         } else {
-          showErrorDialog(context, 'Login Failed', 'Invalid credentials.');
+          showErrorDialog(
+            context,
+            'Login Error',
+            'Session ID (SID) not found in response.',
+          );
         }
       } else {
         // Use the error handler for API responses
@@ -104,7 +85,6 @@ class _LoginScreenState extends State<LoginScreen> {
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
     final isSmallScreen = screenWidth < 400;
-
     // Assuming logo.jpg dimensions (adjust these based on actual image size)
     const double logoWidth = 300; // Example width of logo.jpg
     const double logoHeight = 200; // Example height of logo.jpg
@@ -156,9 +136,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           child: Image.asset(
                             'assets/images/logo.jpg', // Ensure this path is correct and asset is added to pubspec.yaml
                             width: double.infinity,
-                            height:
-                                (logoHeight / logoWidth) *
-                                (isSmallScreen ? 200 : 240),
+                            height: (logoHeight / logoWidth) * (isSmallScreen ? 200 : 240),
                             fit: BoxFit.contain,
                           ),
                         ),
@@ -203,8 +181,7 @@ class _LoginScreenState extends State<LoginScreen> {
                               horizontal: 12,
                             ),
                           ),
-                          validator: (value) =>
-                              value!.isEmpty ? 'Username required' : null,
+                          validator: (value) => value!.isEmpty ? 'Username required' : null,
                         ),
                         SizedBox(height: isSmallScreen ? 12 : 16),
                         // Password Field
@@ -248,8 +225,7 @@ class _LoginScreenState extends State<LoginScreen> {
                               horizontal: 12,
                             ),
                           ),
-                          validator: (value) =>
-                              value!.isEmpty ? 'Password required' : null,
+                          validator: (value) => value!.isEmpty ? 'Password required' : null,
                         ),
                         SizedBox(height: isSmallScreen ? 20 : 24),
                         // Sign In Button

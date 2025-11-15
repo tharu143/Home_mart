@@ -11,7 +11,6 @@ void main() {
 
 class HomeMartApp extends StatelessWidget {
   const HomeMartApp({super.key});
-
   // Define the common server URL for the application
   static const String serverUrl = "http://128.199.27.173";
 
@@ -21,22 +20,14 @@ class HomeMartApp extends StatelessWidget {
       title: 'Home Mart', // New app name
       theme: ThemeData(
         // Define a consistent color scheme for the app for an attractive design
-        primaryColor: const Color(
-          0xFF005BAC,
-        ), // A deep blue for primary actions and app bars
+        primaryColor: const Color(0xFF005BAC), // A deep blue for primary actions and app bars
         colorScheme: ColorScheme.fromSwatch().copyWith(
-          secondary: const Color(
-            0xFF00B4D8,
-          ), // A vibrant teal for accents and interactive elements
-          surface: const Color(
-            0xFFF5F9FF,
-          ), // A light neutral white for backgrounds
+          secondary: const Color(0xFF00B4D8), // A vibrant teal for accents and interactive elements
+          surface: const Color(0xFFF5F9FF), // A light neutral white for backgrounds
           onSurface: const Color(0xFF333333), // Dark grey for general text
           error: const Color(0xFFF44336), // Red for error states
         ),
-        scaffoldBackgroundColor: const Color(
-          0xFFE0F7FA,
-        ), // Light teal for default screen backgrounds
+        scaffoldBackgroundColor: const Color(0xFFE0F7FA), // Light teal for default screen backgrounds
         appBarTheme: const AppBarTheme(
           backgroundColor: Color(0xFF005BAC),
           foregroundColor: Colors.white,
@@ -126,39 +117,68 @@ class HomeMartApp extends StatelessWidget {
         '/': (context) => const LoginScreen(serverUrl: serverUrl),
         // Pass SID and fullName to Dashboard Screen
         '/dashboard': (context) {
-          final args =
-              ModalRoute.of(context)!.settings.arguments
-                  as Map<String, dynamic>?;
+          final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
+          if (args == null || args['sid'] == null || (args['sid'] as String).isEmpty) {
+            // Redirect to login if sid is missing
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              Navigator.pushReplacementNamed(context, '/');
+            });
+            return const LoginScreen(serverUrl: serverUrl); // Fallback widget
+          }
           return DashboardScreen(
             serverUrl: serverUrl,
-            sid: args?['sid'] ?? 'default_sid_for_demo',
-            fullName: args?['fullName'] ?? 'User',
+            sid: args['sid'] as String,
+            fullName: args['fullName'] as String? ?? 'User',
           );
         },
         // Pass SID to Quotation List Screen
         '/quotation_list': (context) {
-          final args =
-              ModalRoute.of(context)!.settings.arguments
-                  as Map<String, dynamic>?;
+          final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
+          if (args == null || args['sid'] == null || (args['sid'] as String).isEmpty) {
+            // Redirect to login if sid is missing
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              Navigator.pushReplacementNamed(context, '/');
+            });
+            return const LoginScreen(serverUrl: serverUrl); // Fallback widget
+          }
           return QuotationListScreen(
             serverUrl: serverUrl,
-            sid: args?['sid'] ?? 'default_sid_for_demo',
+            sid: args['sid'] as String,
           );
         },
         // Pass SID to Quotation Creation Screen
         '/quotation': (context) {
-          final args =
-              ModalRoute.of(context)!.settings.arguments
-                  as Map<String, dynamic>?;
+          final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
+          if (args == null || args['sid'] == null || (args['sid'] as String).isEmpty) {
+            // Redirect to login if sid is missing
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              Navigator.pushReplacementNamed(context, '/');
+            });
+            return const LoginScreen(serverUrl: serverUrl); // Fallback widget
+          }
           return QuotationScreen(
             serverUrl: serverUrl,
-            sid: args?['sid'] ?? 'default_sid_for_demo',
-            initialData: args?['initialData'], // For editing existing quotation
+            sid: args['sid'] as String,
+            initialData: args['initialData'],
           );
         },
-        // Quotation Detail Screen now also receives the serverUrl
-        '/quotation_detail': (context) =>
-            QuotationDetailScreen(serverUrl: serverUrl),
+        // Pass SID and initialData to Quotation Detail Screen
+        '/quotation_detail': (context) {
+          final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
+          if (args == null || args['sid'] == null || (args['sid'] as String).isEmpty) {
+            // Redirect to login if sid is missing
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              Navigator.pushReplacementNamed(context, '/');
+            });
+            return const LoginScreen(serverUrl: serverUrl); // Fallback widget
+          }
+          return QuotationDetailScreen(
+            serverUrl: serverUrl,
+            sid: args['sid'] as String,
+            // Optionally pass initialData if editing an existing quotation
+            // initialData: args['initialData'],
+          );
+        },
       },
     );
   }
